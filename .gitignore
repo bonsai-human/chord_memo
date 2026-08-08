@@ -1,0 +1,19 @@
+node_modules
+dist
+dist-ssr
+*.local
+*.tsbuildinfo
+
+# エディタ / エージェント固有の設定
+.claude
+
+.DS_Store
+Thumbs.db
+
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# 復元の参照に使った公開版のビルド成果物（第三者ライブラリを含む配布物なので追跡しない）
+/index-*.js
+/index-*.css

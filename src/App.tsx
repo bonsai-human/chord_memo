@@ -1,0 +1,745 @@
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { Chord, Measure, Project, SlotRef } from './types';
+import * as storage from './lib/storage';
+import {
+  normalizeProject,
+  resolveMeasureSettings,
+  splitRhythm,
+  updateMeasureSettings,
+  type RhythmDivision,
+} from './lib/measures';
+import * as audio from './lib/audio';
+import { copyRange, pasteBuffer, type CopyBuffer, type PasteMode } from './lib/clipboard';
+import { useHistory } from './hooks/useHistory';
+import Header from './components/Header';
+import Sidebar from './components/Sidebar';
+import ChordGrid from './components/ChordGrid';
+import ActionBar, { type Anchor, type MenuKind } from './components/ActionBar';
+import ChordKeyboard from './components/ChordKeyboard';
+import PopupMenu, { type MenuItem } from './components/PopupMenu';
+import SettingModal, { type SettingType } from './components/SettingModal';
+import GeneralSettingsModal from './components/GeneralSettingsModal';
+import HistoryModal from './components/HistoryModal';
+import ConfirmDialog from './components/ConfirmDialog';
+import AudioSyncModal from './components/AudioSyncModal';
+import YouTubePlayer from './components/YouTubePlayer';
+import * as audioStore from './lib/audioStore';
+
+const MOBILE_BREAKPOINT = 768;
+
+export default function App() {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [project, setProject] = useState<Project | null>(null);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(window.innerWidth >= MOBILE_BREAKPOINT);
+  const [isMobile, setIsMobile] = useState(window.innerWidth < MOBILE_BREAKPOINT);
+
+  const [selectedSlot, setSelectedSlot] = useState<SlotRef | null>(null);
+  const [selectionEnd, setSelectionEnd] = useState<SlotRef | null>(null);
+  const [isRangeMode, setIsRangeMode] = useState(false);
+  const [useDegreeNotation, setUseDegreeNotation] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isInstrumentLoading, setIsInstrumentLoading] = useState(false);
+  const [playingSlot, setPlayingSlot] = useState<{
+    measureIndex: number;
+    slotIndex: number;
+  } | null>(null);
+
+  const [menu, setMenu] = useState<{ kind: MenuKind; anchor: Anchor } | null>(null);
+  const [settingModal, setSettingModal] = useState<SettingType | null>(null);
+  const [showGeneralSettings, setShowGeneralSettings] = useState(false);
+  const [showAudioSync, setShowAudioSync] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
+  const [copyBuffer, setCopyBuffer] = useState<CopyBuffer | null>(null);
+
+  const history = useHistory();
+
+  // --- 初期化 ---
+
+  useEffect(() => {
+    const stored = storage.getAllProjects();
+    if (stored.length > 0) {
+      setProjects(stored);
+      setProject(normalizeProject(stored[0]));
+    } else {
+      const created = normalizeProject(storage.createEmptyProject());
+      storage.saveProject(created);
+      setProjects([created]);
+      setProject(created);
+    }
+  }, []);
+
+  useEffect(() => {
+    const onResize = () => {
+      const mobile = window.innerWidth < MOBILE_BREAKPOINT;
+      setIsMobile(mobile);
+      // 狭い画面ではサイドバーが本文を覆うので開いたままにしない
+      if (mobile) setIsSidebarOpen(false);
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 2500);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
+  // --- 音源 ---
+
+  const instrumentId = project?.instrument;
+  useEffect(() => {
+    if (!instrumentId) return;
+    let cancelled = false;
+    setIsInstrumentLoading(true);
+    audio
+      .loadInstrument(instrumentId)
+      .catch((e) => {
+        console.error(e);
+        if (!cancelled) setToast('音源の読み込みに失敗しました');
+      })
+      .finally(() => {
+        if (!cancelled) setIsInstrumentLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [instrumentId]);
+
+  const audioVolume = project?.audioVolume;
+  useEffect(() => {
+    if (audioVolume !== undefined) audio.setVolume(audioVolume);
+  }, [audioVolume]);
+
+  useEffect(() => () => audio.stop(), []);
+
+  // 選択中プロジェクトのオーディオを IndexedDB から復帰させる
+  const projectId = project?.id;
+  const audioEnabled = project?.audioEnabled;
+  useEffect(() => {
+    if (!projectId) return;
+    let objectUrl: string | null = null;
+    if (!audioEnabled) {
+      audio.clearReferenceAudio();
+      return;
+    }
+    audioStore
+      .getAudio(projectId)
+      .then((blob) => {
+        if (!blob) return;
+        objectUrl = URL.createObjectURL(blob);
+        return audio.loadReferenceAudio(objectUrl);
+      })
+      .catch((e) => console.error('Failed to restore audio:', e));
+    return () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [projectId, audioEnabled]);
+
+
+  // --- 保存 ---
+
+  const commit = useCallback((next: Project) => {
+    const normalized = normalizeProject(next);
+    setProject(normalized);
+    storage.saveProject(normalized);
+    setProjects((list) => list.map((p) => (p.id === normalized.id ? normalized : p)));
+  }, []);
+
+  /** 履歴から復元した状態を反映する（正規化済みなので保存だけ行う） */
+  const restore = useCallback((next: Project) => {
+    setProject(next);
+    storage.saveProject(next);
+    setProjects((list) => list.map((p) => (p.id === next.id ? next : p)));
+  }, []);
+
+  const resolveSettings = useCallback(
+    (index: number) => resolveMeasureSettings(index, project),
+    [project],
+  );
+
+  const handleSelectAudioFile = useCallback(
+    async (file: File) => {
+      if (!project) return;
+      try {
+        await audioStore.saveAudio(project.id, file);
+        const url = URL.createObjectURL(file);
+        await audio.loadReferenceAudio(url);
+        // 頭の無音を読み飛ばした位置を初期値にする
+        const detected = audio.detectAudioStart();
+        commit({
+          ...project,
+          audioEnabled: true,
+          useYoutubeAudio: false,
+          audioUrl: url,
+          audioOffset: Math.round(detected * 100) / 100,
+        });
+        setToast('音源を読み込みました');
+      } catch (e) {
+        console.error(e);
+        setToast('音源の読み込みに失敗しました');
+      }
+    },
+    [project, commit],
+  );
+
+  // --- 選択 ---
+
+  const selectedMeasure = useMemo(
+    () => project?.measures.find((m) => m.id === selectedSlot?.measureId) ?? null,
+    [project, selectedSlot],
+  );
+
+  const selectedMeasureIndex = useMemo(
+    () => project?.measures.findIndex((m) => m.id === selectedSlot?.measureId) ?? -1,
+    [project, selectedSlot],
+  );
+
+  const selectedChord = useMemo((): Chord | null => {
+    if (!project || !selectedSlot || !selectedMeasure) return null;
+    const chordId = selectedMeasure.slots[selectedSlot.slotIndex]?.chordId;
+    return chordId ? (project.chords[chordId] ?? null) : null;
+  }, [project, selectedSlot, selectedMeasure]);
+
+  const voicingOptions = useMemo(
+    () => ({
+      optimize: project?.voicingOptimize ?? true,
+      min: project?.voicingMin ?? 48,
+      max: project?.voicingMax ?? 72,
+    }),
+    [project?.voicingOptimize, project?.voicingMin, project?.voicingMax],
+  );
+
+  const handleSelectSlot = useCallback(
+    (measureId: string, slotIndex: number, shiftKey: boolean) => {
+      // 範囲選択モードでは1回目のタップで始点、2回目で終点を置く
+      if (isRangeMode && selectedSlot && (shiftKey || !selectionEnd)) {
+        setSelectionEnd({ measureId, slotIndex });
+        return;
+      }
+      setSelectedSlot({ measureId, slotIndex });
+      setSelectionEnd(null);
+
+      // 置いてあるコードを鳴らして確認できるようにする
+      const measure = project?.measures.find((m) => m.id === measureId);
+      const chordId = measure?.slots[slotIndex]?.chordId;
+      const chord = chordId ? project?.chords[chordId] : null;
+      if (chord && !isPlaying) void audio.playChord(chord, voicingOptions);
+    },
+    [isRangeMode, selectedSlot, selectionEnd, project, isPlaying, voicingOptions],
+  );
+
+  // --- コード編集 ---
+
+  const updateChord = useCallback(
+    (patch: Partial<Chord>) => {
+      if (!project || !selectedSlot || !selectedMeasure) return;
+      history.push(project, 'コード更新');
+
+      const chords = { ...project.chords };
+      const existingId = selectedMeasure.slots[selectedSlot.slotIndex]?.chordId;
+      const base: Chord = existingId
+        ? chords[existingId]
+        : {
+            ...storage.createEmptyChord(),
+            root: resolveSettings(selectedMeasureIndex).key.replace(/m$/, ''),
+          };
+
+      const updated: Chord = { ...base, ...patch, id: existingId || base.id };
+      chords[updated.id] = updated;
+
+      const measures = project.measures.map((m) => {
+        if (m.id !== selectedMeasure.id) return m;
+        const slots = m.slots.map((s, i) =>
+          i === selectedSlot.slotIndex ? { ...s, chordId: updated.id } : s,
+        );
+        return { ...m, slots };
+      });
+
+      commit({ ...project, measures, chords });
+      if (!isPlaying) void audio.playChord(updated, voicingOptions);
+    },
+    [
+      project,
+      selectedSlot,
+      selectedMeasure,
+      selectedMeasureIndex,
+      history,
+      commit,
+      resolveSettings,
+      isPlaying,
+      voicingOptions,
+    ],
+  );
+
+  const deleteChordOnly = useCallback(() => {
+    if (!project || !selectedSlot) return;
+    history.push(project, 'コード削除');
+    const measures = project.measures.map((m) => {
+      if (m.id !== selectedSlot.measureId) return m;
+      return {
+        ...m,
+        slots: m.slots.map((s, i) => (i === selectedSlot.slotIndex ? { ...s, chordId: null } : s)),
+      };
+    });
+    commit({ ...project, measures });
+    setToast('コードを削除しました');
+  }, [project, selectedSlot, history, commit]);
+
+  const deleteMeasure = useCallback(() => {
+    if (!project || !selectedSlot) return;
+    if (project.measures.length <= 1) {
+      setToast('全ての小節を削除することはできません');
+      return;
+    }
+    history.push(project, '小節削除');
+    const measures = project.measures.filter((m) => m.id !== selectedSlot.measureId);
+    commit({ ...project, measures });
+    setSelectedSlot(null);
+    setToast('小節を削除しました');
+  }, [project, selectedSlot, history, commit]);
+
+  const applyRhythm = useCallback(
+    (division: RhythmDivision) => {
+      if (!project || !selectedSlot) return;
+      if (selectedMeasure?.referenceLabel) {
+        setToast('参照小節のリズムは変更できません');
+        return;
+      }
+      history.push(project, 'リズム分割');
+      commit(splitRhythm(project, selectedSlot.measureId, division));
+      setToast('リズムを分割しました');
+    },
+    [project, selectedSlot, selectedMeasure, history, commit],
+  );
+
+  const applyMeasureSetting = useCallback(
+    (patch: Partial<Measure>) => {
+      if (!project || !selectedSlot) return;
+      if (selectedMeasure?.referenceLabel && !('referenceLabel' in patch)) {
+        setToast('参照小節の設定は変更できません');
+        return;
+      }
+      history.push(project, '小節更新');
+      commit(updateMeasureSettings(project, selectedSlot.measureId, patch));
+    },
+    [project, selectedSlot, selectedMeasure, history, commit],
+  );
+
+  // --- コピー & ペースト ---
+
+  const handleCopy = useCallback(() => {
+    if (!project || !selectedSlot) return;
+    const result = copyRange(project, selectedSlot, selectionEnd, resolveSettings);
+    if (result.buffer) {
+      setCopyBuffer(result.buffer);
+      setSelectionEnd(null);
+      setIsRangeMode(false);
+    }
+    setToast(result.message);
+  }, [project, selectedSlot, selectionEnd, resolveSettings]);
+
+  const handlePaste = useCallback(
+    (mode: PasteMode) => {
+      if (!project || !selectedSlot || !copyBuffer) return;
+      history.push(project, mode === 'transposed' ? '移調貼り付け' : '貼り付け');
+      commit(pasteBuffer(project, copyBuffer, selectedSlot, mode));
+      setToast(mode === 'transposed' ? '移調して貼り付けました' : '貼り付けました');
+    },
+    [project, selectedSlot, copyBuffer, history, commit],
+  );
+
+  // --- 再生 ---
+
+  const stopPlayback = useCallback(() => {
+    audio.stop();
+    setIsPlaying(false);
+    setPlayingSlot(null);
+  }, []);
+
+  const togglePlay = useCallback(() => {
+    if (!project) return;
+    if (isPlaying) {
+      stopPlayback();
+      return;
+    }
+
+    // 選択中の拍があればそこから鳴らす
+    const from =
+      selectedSlot && selectedMeasureIndex >= 0
+        ? { measureIndex: selectedMeasureIndex, slotIndex: selectedSlot.slotIndex }
+        : undefined;
+
+    setIsPlaying(true);
+    audio
+      .playGrid({
+        project,
+        from,
+        onSlot: (event) =>
+          setPlayingSlot({ measureIndex: event.measureIndex, slotIndex: event.slotIndex }),
+        onEnd: () => {
+          setIsPlaying(false);
+          setPlayingSlot(null);
+        },
+      })
+      .catch((e) => {
+        console.error(e);
+        setToast('再生に失敗しました');
+        setIsPlaying(false);
+        setPlayingSlot(null);
+      });
+  }, [project, isPlaying, selectedSlot, selectedMeasureIndex, stopPlayback]);
+
+  const toggleExpansion = useCallback(
+    (measureId: string) => {
+      if (!project) return;
+      const measures = project.measures.map((m) =>
+        m.id === measureId ? { ...m, isReferenceExpanded: !m.isReferenceExpanded } : m,
+      );
+      commit({ ...project, measures });
+    },
+    [project, commit],
+  );
+
+  // --- プロジェクト操作 ---
+
+  const createProject = () => {
+    const created = normalizeProject(storage.createEmptyProject());
+    storage.saveProject(created);
+    setProjects((list) => [...list, created]);
+    setProject(created);
+    setSelectedSlot(null);
+  };
+
+  const renameProject = (id: string, name: string) => {
+    const target = projects.find((p) => p.id === id);
+    if (!target) return;
+    const updated = { ...target, name };
+    storage.saveProject(updated);
+    setProjects((list) => list.map((p) => (p.id === id ? updated : p)));
+    if (project?.id === id) setProject(updated);
+  };
+
+  const removeProject = (id: string) => {
+    storage.deleteProject(id);
+    const remaining = projects.filter((p) => p.id !== id);
+    if (remaining.length > 0) {
+      setProjects(remaining);
+      if (project?.id === id) setProject(normalizeProject(remaining[0]));
+    } else {
+      const created = normalizeProject(storage.createEmptyProject());
+      storage.saveProject(created);
+      setProjects([created]);
+      setProject(created);
+    }
+    setSelectedSlot(null);
+  };
+
+  const exportProject = () => {
+    if (!project) return;
+    const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${project.name || 'project'}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setToast('ファイルを書き出しました');
+  };
+
+  const importProject = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const parsed = JSON.parse(e.target?.result as string);
+        const imported = normalizeProject({
+          ...parsed,
+          id: storage.generateUUID(),
+          name: `${parsed.name} (Imported)`,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+        storage.saveProject(imported);
+        setProjects((list) => [...list, imported]);
+        setProject(imported);
+        setToast('プロジェクトを読み込みました');
+      } catch (err) {
+        console.error(err);
+        setToast('読み込みに失敗しました。ファイル形式を確認してください。');
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  // --- ショートカット ---
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'SELECT') return;
+
+      if (e.key === ' ') {
+        e.preventDefault();
+        togglePlay();
+      }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        deleteChordOnly();
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) {
+        e.preventDefault();
+        handleCopy();
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')) {
+        e.preventDefault();
+        handlePaste('normal');
+      }
+      if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        history.undo(project, restore, setToast);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [deleteChordOnly, handleCopy, handlePaste, history, project, restore, togglePlay]);
+
+  // --- メニュー ---
+
+  const menuItems = (): MenuItem[] => {
+    if (!menu || !project) return [];
+    switch (menu.kind) {
+      case 'rhythm':
+        return [
+          { label: '4分音符', hint: '1拍', onClick: () => applyRhythm('div4') },
+          { label: '8分音符', hint: '0.5拍', onClick: () => applyRhythm('div8') },
+          { label: '4分3連', hint: '2拍を3分割', onClick: () => applyRhythm('div4t') },
+          { label: '8分3連', hint: '1拍を3分割', onClick: () => applyRhythm('div8t') },
+          { label: '16分音符', hint: '0.25拍', onClick: () => applyRhythm('div16') },
+        ];
+      case 'paste':
+        return [
+          { label: 'そのまま貼り付け', onClick: () => handlePaste('normal') },
+          {
+            label: 'キーに合わせて貼り付け',
+            color: 'var(--accent)',
+            onClick: () => handlePaste('transposed'),
+          },
+        ];
+      case 'delete':
+        return [
+          { label: 'コードのみ削除', onClick: deleteChordOnly },
+          { label: '小節ごと削除', color: 'var(--danger)', onClick: deleteMeasure },
+        ];
+      case 'settings': {
+        const measure = selectedMeasure;
+        return [
+          { label: 'キー設定', checked: !!measure?.key, onClick: () => setSettingModal('key') },
+          {
+            label: 'テンポ設定',
+            checked: !!measure?.tempo,
+            onClick: () => setSettingModal('tempo'),
+          },
+          {
+            label: '拍子設定',
+            checked: !!measure?.timeSignature,
+            onClick: () => setSettingModal('timeSignature'),
+          },
+          {
+            label: 'スウィング',
+            checked: measure?.swing !== undefined,
+            onClick: () => setSettingModal('swing'),
+          },
+          {
+            label: '参照再生',
+            checked: !!measure?.referenceLabel,
+            onClick: () => setSettingModal('reference'),
+          },
+        ];
+      }
+      case 'label':
+        return [{ label: 'ラベルを設定', onClick: () => setSettingModal('label') }];
+      case 'undo':
+      case 'redo':
+        return [{ label: '履歴を開く', onClick: () => setShowHistory(true) }];
+      default:
+        return [];
+    }
+  };
+
+  if (!project) return null;
+
+  return (
+    <div style={{ display: 'flex', height: '100%' }}>
+      <Sidebar
+        isOpen={isSidebarOpen}
+        isMobile={isMobile}
+        onRequestClose={() => setIsSidebarOpen(false)}
+        projects={projects}
+        currentProject={project}
+        onSelect={(p) => {
+          setProject(normalizeProject(p));
+          setSelectedSlot(null);
+          if (isMobile) setIsSidebarOpen(false);
+        }}
+        onCreate={createProject}
+        onRename={renameProject}
+        onDelete={(id) => setDeleteTarget(projects.find((p) => p.id === id) ?? null)}
+        onExport={exportProject}
+        onImport={importProject}
+      />
+
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+        <Header
+          isSidebarOpen={isSidebarOpen}
+          setIsSidebarOpen={setIsSidebarOpen}
+          isPlaying={isPlaying}
+          isInstrumentLoading={isInstrumentLoading}
+          onTogglePlay={togglePlay}
+          currentProject={project}
+          onOpenHelp={() => setToast('ヘルプはこれから実装します')}
+          onOpenAudioSync={() => setShowAudioSync(true)}
+          onOpenSettings={() => setShowGeneralSettings(true)}
+          isRangeMode={isRangeMode}
+          onToggleRangeMode={() => {
+            const next = !isRangeMode;
+            setIsRangeMode(next);
+            if (!next) setSelectionEnd(null);
+          }}
+        />
+
+        <div style={{ flex: 1, overflowY: 'auto', background: 'var(--bg-grid)' }}>
+          <ChordGrid
+            project={project}
+            selectedSlot={selectedSlot}
+            selectionEnd={selectionEnd}
+            playingSlot={playingSlot}
+            useDegreeNotation={useDegreeNotation}
+            resolveSettings={resolveSettings}
+            onSelectSlot={handleSelectSlot}
+            onSelectChunk={(measureId, anchor) => {
+              // 行ヘッダのクリックでその小節を選び、小節設定メニューを開く
+              setSelectedSlot({ measureId, slotIndex: 0 });
+              setSelectionEnd(null);
+              setMenu({ kind: 'settings', anchor });
+            }}
+            onToggleExpansion={toggleExpansion}
+            isMobile={isMobile}
+          />
+        </div>
+
+        <div style={{ background: 'var(--bg-grid)', borderTop: '1px solid var(--border)' }}>
+          <ActionBar
+            canPaste={!!copyBuffer}
+            canUndo={history.undoStack.length > 0}
+            canRedo={history.redoStack.length > 0}
+            isRangeMode={isRangeMode}
+            hasSelection={!!selectedSlot}
+            isMobile={isMobile}
+            onOpenMenu={(kind, anchor) => setMenu({ kind, anchor })}
+            onCopy={handleCopy}
+            onPaste={() => handlePaste('normal')}
+            onUndo={() => history.undo(project, restore, setToast)}
+            onRedo={() => history.redo(project, restore, setToast)}
+            onDelete={deleteChordOnly}
+          />
+
+          <ChordKeyboard
+            selectedChord={selectedChord}
+            projectKey={
+              selectedMeasureIndex >= 0 ? resolveSettings(selectedMeasureIndex).key : project.key
+            }
+            isSlotSelected={!!selectedSlot}
+            useDegreeNotation={useDegreeNotation}
+            onUpdateChord={updateChord}
+          />
+        </div>
+      </div>
+
+      {menu && <PopupMenu items={menuItems()} position={menu.anchor} onClose={() => setMenu(null)} />}
+
+      {settingModal && selectedMeasure && (
+        <SettingModal
+          type={settingModal}
+          project={project}
+          measure={selectedMeasure}
+          measureIndex={selectedMeasureIndex}
+          onApply={applyMeasureSetting}
+          onRemove={() => {
+            const patch: Partial<Measure> = {};
+            if (settingModal === 'key') patch.key = undefined;
+            if (settingModal === 'tempo') patch.tempo = undefined;
+            if (settingModal === 'timeSignature') patch.timeSignature = undefined;
+            if (settingModal === 'swing') patch.swing = undefined;
+            if (settingModal === 'reference') patch.referenceLabel = undefined;
+            if (settingModal === 'label') patch.label = undefined;
+            applyMeasureSetting(patch);
+          }}
+          onClose={() => setSettingModal(null)}
+        />
+      )}
+
+      <YouTubePlayer visible={!!(project.useYoutubeAudio && project.youtubeUrl)} />
+
+      {showAudioSync && (
+        <AudioSyncModal
+          project={project}
+          onUpdate={(patch) => commit({ ...project, ...patch })}
+          onSelectFile={handleSelectAudioFile}
+          onClose={() => setShowAudioSync(false)}
+        />
+      )}
+
+      {showGeneralSettings && (
+        <GeneralSettingsModal
+          project={project}
+          useDegreeNotation={useDegreeNotation}
+          onChangeDegreeNotation={setUseDegreeNotation}
+          onUpdate={(patch) => commit({ ...project, ...patch })}
+          onClose={() => setShowGeneralSettings(false)}
+        />
+      )}
+
+      {showHistory && (
+        <HistoryModal
+          undoStack={history.undoStack}
+          redoStack={history.redoStack}
+          onJump={(index, direction) => history.jumpTo(index, direction, project, restore, setToast)}
+          onClose={() => setShowHistory(false)}
+        />
+      )}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          title="プロジェクトの削除"
+          message={`プロジェクト '${deleteTarget.name}' を削除してもよろしいですか？`}
+          onConfirm={() => removeProject(deleteTarget.id)}
+          onClose={() => setDeleteTarget(null)}
+        />
+      )}
+
+      {toast && (
+        <div
+          onClick={() => setToast(null)}
+          style={{
+            position: 'fixed',
+            bottom: '20px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            background: 'var(--border)',
+            color: '#fff',
+            padding: '10px 20px',
+            borderRadius: '8px',
+            boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)',
+            zIndex: 9999,
+            cursor: 'pointer',
+          }}
+        >
+          {toast}
+        </div>
+      )}
+    </div>
+  );
+}
