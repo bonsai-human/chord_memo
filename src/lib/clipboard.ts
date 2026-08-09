@@ -29,6 +29,38 @@ export interface CopyResult {
   message: string;
 }
 
+/** 始点と終点から求めた、前後の向きを揃えた選択範囲 */
+export interface SlotRange {
+  /** 小節インデックス */
+  from: number;
+  to: number;
+  /** from の小節での開始スロット */
+  firstSlot: number;
+  /** to の小節での終了スロット */
+  lastSlot: number;
+}
+
+/**
+ * 選択の始点・終点を前後の向きに揃える。
+ * 終点が無ければ始点1マスだけの範囲になる。
+ */
+export function resolveRange(
+  project: Project,
+  start: SlotRef,
+  end: SlotRef | null,
+): SlotRange | null {
+  const tail = end || start;
+  const startIndex = project.measures.findIndex((m) => m.id === start.measureId);
+  const endIndex = project.measures.findIndex((m) => m.id === tail.measureId);
+  if (startIndex === -1 || endIndex === -1) return null;
+
+  const forward =
+    startIndex < endIndex || (startIndex === endIndex && start.slotIndex <= tail.slotIndex);
+  return forward
+    ? { from: startIndex, to: endIndex, firstSlot: start.slotIndex, lastSlot: tail.slotIndex }
+    : { from: endIndex, to: startIndex, firstSlot: tail.slotIndex, lastSlot: start.slotIndex };
+}
+
 /** 選択範囲をコピーバッファへ取り出す */
 export function copyRange(
   project: Project,
@@ -36,24 +68,15 @@ export function copyRange(
   end: SlotRef | null,
   resolve: (index: number) => EffectiveSettings,
 ): CopyResult {
-  const tail = end || start;
-  const startIndex = project.measures.findIndex((m) => m.id === start.measureId);
-  const endIndex = project.measures.findIndex((m) => m.id === tail.measureId);
-  if (startIndex === -1 || endIndex === -1) return { message: 'コピーできませんでした' };
-
-  const forward =
-    startIndex < endIndex || (startIndex === endIndex && start.slotIndex <= tail.slotIndex);
-  const [from, to] = forward ? [startIndex, endIndex] : [endIndex, startIndex];
+  const range = resolveRange(project, start, end);
+  if (!range) return { message: 'コピーできませんでした' };
+  const { from, to, firstSlot, lastSlot } = range;
 
   if (project.measures.slice(from, to + 1).some((m) => m.referenceLabel)) {
     return {
       message: '参照関係を含む範囲はコピーできません。コードのみを選択してください。',
     };
   }
-
-  const [firstSlot, lastSlot] = forward
-    ? [start.slotIndex, tail.slotIndex]
-    : [tail.slotIndex, start.slotIndex];
 
   const measures: CopiedMeasure[] = [];
   const chords: Record<string, Chord> = {};

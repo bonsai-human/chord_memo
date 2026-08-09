@@ -152,15 +152,15 @@ export default function GeneralSettingsModal({
           <div style={rowStyle}>
             <span style={{ fontSize: '0.85rem' }}>音量</span>
             <span style={{ color: 'var(--accent)', fontSize: '0.85rem' }}>
-              {project.audioVolume}%
+              {project.masterVolume}%
             </span>
           </div>
           <input
             type="range"
             min="0"
             max="100"
-            value={project.audioVolume}
-            onChange={(e) => onUpdate({ audioVolume: parseInt(e.target.value, 10) })}
+            value={project.masterVolume}
+            onChange={(e) => onUpdate({ masterVolume: parseInt(e.target.value, 10) })}
           />
         </div>
 

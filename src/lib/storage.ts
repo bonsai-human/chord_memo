@@ -2,6 +2,8 @@ import type { Chord, InstrumentId, Measure, Project, Slot } from '../types';
 
 const STORAGE_KEY = 'chord_memo_projects';
 const DEFAULT_SLOT_COUNT = 4;
+/** 演奏音の既定音量。和音が重なっても歪まない値にしてある */
+const DEFAULT_MASTER_VOLUME = 50;
 
 export function generateUUID(): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
@@ -19,7 +21,9 @@ export function createEmptyChord(): Chord {
     fifth: '',
     seventh: '',
     tensions: [],
-    onChord: 'C',
+    // 空はルートと同じ音を指す。ここを 'C' にすると C 以外のキーで
+    // 作ったコードに /C のオンコードが付いてしまう
+    onChord: '',
     isDimMode: false,
     isNC: false,
     omits: [],
@@ -52,6 +56,7 @@ export function createEmptyProject(): Project {
     voicingMax: 72,
     loopEnabled: false,
     metronomeEnabled: false,
+    masterVolume: DEFAULT_MASTER_VOLUME,
     audioOffset: 0,
     audioVolume: 80,
     audioEnabled: false,
@@ -135,6 +140,8 @@ function migrate(raw: any): Project {
     voicingMax: raw.voicingMax ?? 72,
     loopEnabled: raw.loopEnabled ?? false,
     metronomeEnabled: raw.metronomeEnabled ?? false,
+    // 以前は演奏音と同期音源が audioVolume を共用していた。演奏音は分離する
+    masterVolume: raw.masterVolume ?? DEFAULT_MASTER_VOLUME,
     audioUrl: raw.audioUrl || undefined,
     audioOffset: raw.audioOffset ?? 0,
     audioVolume: raw.audioVolume ?? 80,

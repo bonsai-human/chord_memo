@@ -59,6 +59,8 @@ export interface Project {
   voicingMax: number;
   loopEnabled: boolean;
   metronomeEnabled: boolean;
+  /** 演奏音の音量（0-100） */
+  masterVolume: number;
   audioUrl?: string;
   audioOffset: number;
   audioVolume: number;

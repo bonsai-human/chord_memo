@@ -462,6 +462,7 @@ export default function ChordKeyboard({
                     tensions: [],
                     omits: [],
                     isDimMode: false,
+                    onChord: '',
                   })
                 }
               >

@@ -28,8 +28,14 @@ let loopHandle: number | null = null;
 let referencePlayer: Tone.Player | null = null;
 let referenceVolumeNode: Tone.Volume | null = null;
 
+/**
+ * 演奏音の出口。テンションを積んだ和音は同時発音数が多く、
+ * 素通しだと簡単にクリップするのでリミッターを挟む。
+ */
 function output(): Tone.Volume {
-  if (!volumeNode) volumeNode = new Tone.Volume(0).toDestination();
+  if (!volumeNode) {
+    volumeNode = new Tone.Volume(0).connect(new Tone.Limiter(-1).toDestination());
+  }
   return volumeNode;
 }
 
@@ -84,18 +90,60 @@ export function hasReferenceAudio(): boolean {
   return !!referencePlayer?.buffer?.loaded;
 }
 
+/** 音の立ち上がりを探す窓の長さ（秒） */
+const ONSET_WINDOW = 0.02;
+/** 曲中のいちばん大きい窓に対して、これを超えたら「鳴っている」とみなす（−20dB 相当） */
+const ONSET_PEAK_RATIO = 0.1;
+
 /**
- * 曲の頭の無音を読み飛ばした位置（秒）を返す。threshold はデシベル。
+ * 曲の頭の無音を読み飛ばした位置（秒）を返す。floorDb は絶対的な下限。
+ *
+ * 実際の音源はテープヒスやエンコーダのノイズを含み、1サンプルずつ絶対値を
+ * 見るだけだと先頭で引っかかって 0 秒になってしまう。20ms ごとの RMS を出し、
+ * 「曲中のいちばん大きい箇所に対して十分な大きさ」になる最初の窓を探す。
  */
-export function detectAudioStart(threshold = -40): number {
+export function detectAudioStart(floorDb = -40): number {
   const buffer = referencePlayer?.buffer?.get();
   if (!buffer) return 0;
-  const data = buffer.getChannelData(0);
-  const limit = Math.pow(10, threshold / 20);
-  for (let i = 0; i < data.length; i++) {
-    if (Math.abs(data[i]) > limit) return i / buffer.sampleRate;
+
+  const rate = buffer.sampleRate;
+  const channels = Array.from({ length: buffer.numberOfChannels }, (_, i) =>
+    buffer.getChannelData(i),
+  );
+  if (channels.length === 0) return 0;
+  const length = channels[0].length;
+  /** その位置でいちばん大きいチャンネルの振幅 */
+  const amplitude = (i: number) =>
+    channels.reduce((max, data) => Math.max(max, Math.abs(data[i])), 0);
+
+  const windowSize = Math.max(1, Math.round(rate * ONSET_WINDOW));
+  const levels: number[] = [];
+  let peak = 0;
+  for (let i = 0; i < length; i += windowSize) {
+    const end = Math.min(i + windowSize, length);
+    let sum = 0;
+    for (let j = i; j < end; j++) {
+      const value = amplitude(j);
+      sum += value * value;
+    }
+    const rms = Math.sqrt(sum / (end - i));
+    levels.push(rms);
+    if (rms > peak) peak = rms;
   }
-  return 0;
+  if (peak <= 0) return 0;
+
+  const threshold = Math.max(Math.pow(10, floorDb / 20), peak * ONSET_PEAK_RATIO);
+  const hit = levels.findIndex((level) => level >= threshold);
+  if (hit <= 0) return 0;
+
+  // 窓の頭で切ると音の立ち上がりを削るので、1つ前の窓まで戻って
+  // 実際に振幅が出はじめる位置を拾う
+  const searchFrom = (hit - 1) * windowSize;
+  const searchTo = Math.min(length, (hit + 1) * windowSize);
+  for (let i = searchFrom; i < searchTo; i++) {
+    if (amplitude(i) > threshold / 4) return i / rate;
+  }
+  return (hit * windowSize) / rate;
 }
 
 export function loadInstrument(id: InstrumentId): Promise<void> {
