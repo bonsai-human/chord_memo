@@ -1,4 +1,4 @@
-import type { Chord, EffectiveSettings, Measure, Project } from '../types';
+import type { Chord, EffectiveSettings, Measure, MelodySlot, Project } from '../types';
 import {
   getPitchClassName,
   getTranspositionOffset,
@@ -9,6 +9,12 @@ import { cleanupOrphanedChords, createEmptyMeasure, generateUUID } from './stora
 
 /** 内容を持つ最後の小節の後ろに常に確保する空小節の数 */
 const TRAILING_EMPTY_MEASURES = 3;
+
+/**
+ * メロディーを動かす向き。コードはピッチクラスしか持たないので +11 でも
+ * −1 でも同じだが、メロディーはオクターブを持つため近い方へ動かす
+ */
+const nearestShift = (semitones: number) => (semitones > 6 ? semitones - 12 : semitones);
 
 function hasContent(m: Measure): boolean {
   return m.slots.some((s) => s.chordId !== null) || !!m.label || !!m.referenceLabel;
@@ -175,7 +181,12 @@ export function updateMeasureSettings(
           remapped[slot.chordId] = transposed.id;
           return { ...slot, chordId: transposed.id };
         });
-        measures[i] = { ...m, slots: nextSlots };
+        // メロディーも同じだけ動かす（音域を保つため近い向きで）
+        const melodyShift = nearestShift(semitones);
+        const nextMelody = m.melody?.map((slot) =>
+          slot.pitch === null ? slot : { ...slot, pitch: slot.pitch + melodyShift },
+        );
+        measures[i] = { ...m, slots: nextSlots, melody: nextMelody };
       }
     }
   }
@@ -248,10 +259,77 @@ export function transposeProject(project: Project, semitones: number): Project {
       }
       return { ...slot, chordId: remapped[cacheKey] };
     });
-    return { ...measure, slots };
+    const melody = measure.melody?.map((slot) =>
+      slot.pitch === null ? slot : { ...slot, pitch: slot.pitch + nearestShift(shift) },
+    );
+    return { ...measure, slots, melody };
   });
 
   return normalizeProject({ ...shifted, measures, chords });
+}
+
+/** その小節のメロディー。未設定なら拍数ぶんの休符を返す */
+export function melodyOf(measure: Measure, timeSignature: [number, number]): MelodySlot[] {
+  if (measure.melody && measure.melody.length > 0) return measure.melody;
+  return Array.from({ length: timeSignature[0] }, () => ({
+    pitch: null,
+    duration: 4 / timeSignature[1],
+  }));
+}
+
+/** 曲中で使われている音高の範囲。メロディーの縦位置を決めるのに使う */
+export function melodyRange(project: Project): { low: number; high: number } | null {
+  let low = Infinity;
+  let high = -Infinity;
+  project.measures.forEach((measure) => {
+    measure.melody?.forEach((slot) => {
+      if (slot.pitch === null) return;
+      if (slot.pitch < low) low = slot.pitch;
+      if (slot.pitch > high) high = slot.pitch;
+    });
+  });
+  return low === Infinity ? null : { low, high };
+}
+
+/** メロディーの刻みを変える。元の位置にあった音は引き継ぐ */
+export function splitMelodyRhythm(
+  project: Project,
+  measureId: string,
+  division: RhythmDivision,
+): Project {
+  const index = project.measures.findIndex((m) => m.id === measureId);
+  if (index === -1) return project;
+
+  const measures = [...project.measures];
+  const target = measures[index];
+  const timeSignature = resolveMeasureSettings(index, project, measures).timeSignature;
+  const source = melodyOf(target, timeSignature);
+  const total = measureLength(timeSignature);
+  const unit = DIVISION_DURATION[division];
+  const count = Math.round(total / unit);
+  const epsilon = 0.001;
+
+  const melody: MelodySlot[] = [];
+  let position = 0;
+  for (let i = 0; i < count; i++) {
+    const duration = i === count - 1 ? Math.max(0.1, total - position) : unit;
+
+    let picked: MelodySlot | null = null;
+    let cursor = 0;
+    for (const slot of source) {
+      if (cursor + slot.duration > position + epsilon && cursor <= position + epsilon) {
+        picked = slot;
+        break;
+      }
+      cursor += slot.duration;
+    }
+
+    melody.push({ pitch: picked?.pitch ?? null, duration, tie: picked?.tie });
+    position += duration;
+  }
+
+  measures[index] = { ...target, melody };
+  return normalizeProject({ ...project, measures });
 }
 
 export type RhythmDivision = 'div4' | 'div8' | 'div16' | 'div4t' | 'div8t';

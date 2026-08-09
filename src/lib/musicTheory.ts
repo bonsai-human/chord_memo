@@ -224,6 +224,39 @@ export function getChordName(chord: Chord | null | undefined): string {
   return name;
 }
 
+/** 音階の度数表記（メロディー用）。7度を超える分はオクターブとして扱わない */
+const SCALE_DEGREE_NAMES = ['1', 'b2', '2', 'b3', '3', '4', '#4', '5', 'b6', '6', 'b7', '7'];
+
+/**
+ * MIDI 番号をキーに対する度数で表す（例: キー C の 60 → "1"）。
+ * オクターブ違いは上下の点で表すので、ここでは度数だけを返す。
+ */
+export function getScaleDegree(pitch: number, key: string): string {
+  const tonic = rootOffset(key);
+  return SCALE_DEGREE_NAMES[(((pitch - tonic) % 12) + 12) % 12];
+}
+
+/** キーの主音を基準にしたオクターブ番号。中央付近が 0 になる */
+export function getDegreeOctave(pitch: number, key: string): number {
+  const tonic = rootOffset(key);
+  return Math.floor((pitch - tonic) / 12) - 4;
+}
+
+/**
+ * その度数（音階の何番目か）に当たる MIDI 番号のうち、
+ * 基準の音にいちばん近いものを返す。段階入力で音が飛ばないようにする。
+ */
+export function pitchForDegree(degree: number, key: string, near: number): number {
+  const scale = key.endsWith('m') ? MINOR_DEGREES : MAJOR_DEGREES;
+  const tonic = rootOffset(key);
+  const offset = scale[((degree - 1) % 7 + 7) % 7];
+  // near と同じオクターブから始めて、上下1オクターブの中で最も近いものを選ぶ
+  const base = Math.round((near - tonic - offset) / 12) * 12 + tonic + offset;
+  return [base - 12, base, base + 12].reduce((best, candidate) =>
+    Math.abs(candidate - near) < Math.abs(best - near) ? candidate : best,
+  );
+}
+
 /** コード名の解析結果。id は呼び出し側で振る */
 export type ParsedChord = Omit<Chord, 'id'>;
 

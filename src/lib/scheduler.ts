@@ -1,8 +1,8 @@
 import type { Chord, Project, SwingResolution } from '../types';
-import { lastContentIndex, measureLength } from './measures';
+import { lastContentIndex, measureLength, melodyOf } from './measures';
 
 export interface ScheduledEvent {
-  type: 'chord' | 'metronome' | 'progress_only';
+  type: 'chord' | 'metronome' | 'progress_only' | 'melody';
   /** 曲頭からの秒数 */
   startTime: number;
   duration: number;
@@ -15,6 +15,9 @@ export interface ScheduledEvent {
   key: string;
   tempo: number;
   isDownbeat?: boolean;
+  /** melody のときの音高（MIDI）とマス番号 */
+  pitch?: number;
+  melodyIndex?: number;
   loopInfo?: { current: number; total: number };
   expansionIndex?: number;
 }
@@ -113,6 +116,10 @@ export function buildTimeline(project: Project, options: Options = {}): Timeline
     const barLength = measureLength(timeSignature);
     const swing = measure.swing ?? 0;
 
+    // メロディーはコードと別の刻みを持つので、小節の頭から別に積む
+    const measureStart = elapsed;
+    const measurePosition = position;
+
     measure.slots.forEach((slot, slotIndex) => {
       const delay = (p: number) => swingDelay(p, measureResolution, tempo, swing);
       const startTime = elapsed + delay(position);
@@ -173,6 +180,40 @@ export function buildTimeline(project: Project, options: Options = {}): Timeline
       elapsed += beats * (60 / tempo);
     });
 
+    // メロディー。タイは直前の音を伸ばす
+    let melodyElapsed = measureStart;
+    let melodyPosition = measurePosition;
+    melodyOf(measure, timeSignature).forEach((slot, melodyIndex) => {
+      const delay = (p: number) => swingDelay(p, measureResolution, tempo, swing);
+      const startTime = melodyElapsed + delay(melodyPosition);
+      const beats = slot.duration || 1;
+      const duration =
+        melodyElapsed + beats * (60 / tempo) + delay(melodyPosition + beats) - startTime;
+
+      const previous = [...events].reverse().find((e) => e.type === 'melody');
+      if (slot.tie && previous && previous.pitch !== undefined) {
+        previous.duration += duration;
+      } else if (slot.pitch !== null) {
+        events.push({
+          type: 'melody',
+          startTime,
+          duration,
+          measureIndex: displayIndex,
+          slotIndex: melodyIndex,
+          sourceMeasureIndex: originalIndex,
+          chord: null,
+          key,
+          tempo,
+          pitch: slot.pitch,
+          melodyIndex,
+          loopInfo,
+        });
+      }
+
+      melodyPosition += beats;
+      melodyElapsed += beats * (60 / tempo);
+    });
+
     resolution = measureResolution;
   });
 
@@ -194,7 +235,9 @@ export function rangeBounds(
   from: SlotPosition,
   to: SlotPosition,
 ): { start: number; end: number } {
-  const events = timeline.events.filter((e) => e.type !== 'metronome');
+  const events = timeline.events.filter(
+    (e) => e.type === 'chord' || e.type === 'progress_only',
+  );
   const at = (position: SlotPosition) =>
     events.findIndex(
       (e) => e.measureIndex === position.measureIndex && e.slotIndex === position.slotIndex,
@@ -214,7 +257,10 @@ export function rangeBounds(
 /** 指定した表示位置のイベント開始時刻を返す（途中再生用） */
 export function timeOf(timeline: Timeline, measureIndex: number, slotIndex: number): number {
   const hit = timeline.events.find(
-    (e) => e.type !== 'metronome' && e.measureIndex === measureIndex && e.slotIndex === slotIndex,
+    (e) =>
+      (e.type === 'chord' || e.type === 'progress_only') &&
+      e.measureIndex === measureIndex &&
+      e.slotIndex === slotIndex,
   );
   return hit?.startTime ?? 0;
 }
