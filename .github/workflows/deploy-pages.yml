@@ -2,11 +2,8 @@ name: Deploy to GitHub Pages
 
 on:
   push:
-    # main のほか、作業ブランチも公開して確認できるようにしている。
-    # プレビューが不要になったら 'claude/**' の行を消す
     branches:
       - main
-      - 'claude/**'
   workflow_dispatch:
 
 permissions:
