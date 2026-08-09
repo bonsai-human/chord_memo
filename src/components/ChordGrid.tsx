@@ -6,31 +6,67 @@ import { getChordName, getDegreeName, getTheoreticalKeyDisplay } from '../lib/mu
 const DESKTOP_CONTENT_WIDTH = 968;
 const BASE_FONT_DESKTOP = 1.1;
 const BASE_FONT_MOBILE = 0.95;
-/** 文字幅の見積もり係数（1文字 ≒ fontSize * 16 * この値） */
-const CHAR_WIDTH_RATIO = 0.5;
+const MIN_FONT = 0.5;
+/** 1rem = 何 px か */
+const ROOT_FONT_PX = 16;
+/** スロット左右の内側余白 */
+const SLOT_PADDING = 4;
+/** これを超えるとスロットからはみ出して表示する */
+const EXPAND_MARGIN_DESKTOP = 100;
+const EXPAND_MARGIN_MOBILE = 50;
+
+let measureContext: CanvasRenderingContext2D | null | undefined;
+const widthCache = new Map<string, number>();
+
+/**
+ * コード名を 1rem・太字で描いたときの幅（px）を実測する。
+ * 文字数から見積もると "C" と "Cm7(b5)/G"、半角と全角の差を拾えないため、
+ * canvas で実際に測ってキャッシュする。フォントサイズには比例するので
+ * ここで得た幅に rem 値を掛ければ任意のサイズでの幅になる。
+ */
+function measureAtOneRem(name: string): number {
+  const cached = widthCache.get(name);
+  if (cached !== undefined) return cached;
+
+  if (measureContext === undefined) {
+    measureContext = document.createElement('canvas').getContext('2d');
+    if (measureContext) {
+      const family = getComputedStyle(document.body).fontFamily || 'sans-serif';
+      measureContext.font = `bold ${ROOT_FONT_PX}px ${family}`;
+    }
+  }
+  // 計測できない環境では従来どおり文字数から見積もる
+  const width = measureContext
+    ? measureContext.measureText(name).width
+    : name.length * ROOT_FONT_PX * 0.5;
+
+  widthCache.set(name, width);
+  return width;
+}
 
 interface FontResult {
   fontSize: number;
   needsExpansion: boolean;
 }
 
-/** コード名がスロットに収まるフォントサイズを求める */
+/** コード名がスロットに収まるフォントサイズ（rem）を求める */
 function fitChordName(
   name: string,
   slotWidth: number,
   displaySlots: number,
   isMobile: boolean,
 ): FontResult {
-  const margin = isMobile ? 50 : 100;
   const base = isMobile ? BASE_FONT_MOBILE : BASE_FONT_DESKTOP;
-  const available = displaySlots * slotWidth - 4;
-  const estimated = name.length * base * 16 * CHAR_WIDTH_RATIO;
+  const margin = isMobile ? EXPAND_MARGIN_MOBILE : EXPAND_MARGIN_DESKTOP;
+  const unitWidth = measureAtOneRem(name);
+  if (unitWidth <= 0) return { fontSize: base, needsExpansion: false };
 
-  let fontSize = base;
-  if (estimated > available) fontSize = available / (name.length * 16 * CHAR_WIDTH_RATIO);
-  fontSize = Math.max(0.5, fontSize);
+  // コードのない後続スロットぶんまで使える
+  const available = Math.max(0, displaySlots * slotWidth - SLOT_PADDING);
+  const fontSize = Math.min(base, Math.max(MIN_FONT, available / unitWidth));
 
-  const needsExpansion = name.length * fontSize * 16 * CHAR_WIDTH_RATIO > slotWidth - margin;
+  // 縮めても隣にかかるなら max-content ではみ出させる
+  const needsExpansion = unitWidth * fontSize > slotWidth - margin;
   return { fontSize, needsExpansion };
 }
 
@@ -86,6 +122,8 @@ interface SlotViewProps {
   inSelection: boolean;
   isReferenceOverlay: boolean;
   referenceLabelText: string | null;
+  /** 参照小節を再生中に出す「現在の周回 / 総回数」 */
+  loopProgress: string | null;
   onSelect: (e: React.MouseEvent) => void;
   onToggleExpansion: () => void;
 }
@@ -103,6 +141,7 @@ function SlotView({
   inSelection,
   isReferenceOverlay,
   referenceLabelText,
+  loopProgress,
   onSelect,
   onToggleExpansion,
 }: SlotViewProps) {
@@ -147,24 +186,44 @@ function SlotView({
         >
           {slotIndex === 0 && referenceLabelText && (
             <span
-              onClick={(e) => {
-                e.stopPropagation();
-                onToggleExpansion();
-              }}
               style={{
-                fontSize: '0.65rem',
-                color: 'var(--accent)',
-                background: 'var(--panel)',
-                padding: '2px 6px',
-                borderRadius: '4px',
-                border: '1px solid var(--border)',
-                whiteSpace: 'nowrap',
-                fontWeight: 'bold',
-                cursor: 'pointer',
-                pointerEvents: 'auto',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '2px',
               }}
             >
-              {referenceLabelText}
+              <span
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleExpansion();
+                }}
+                style={{
+                  fontSize: '0.65rem',
+                  color: 'var(--accent)',
+                  background: 'var(--panel)',
+                  padding: '2px 6px',
+                  borderRadius: '4px',
+                  border: '1px solid var(--border)',
+                  whiteSpace: 'nowrap',
+                  fontWeight: 'bold',
+                  cursor: 'pointer',
+                  pointerEvents: 'auto',
+                }}
+              >
+                {referenceLabelText}
+              </span>
+              {loopProgress && (
+                <span
+                  style={{
+                    fontSize: '0.6rem',
+                    color: 'var(--accent-warm)',
+                    fontWeight: 'bold',
+                  }}
+                >
+                  {loopProgress}
+                </span>
+              )}
             </span>
           )}
         </div>
@@ -212,7 +271,11 @@ interface Props {
   project: Project;
   selectedSlot: SlotRef | null;
   selectionEnd: SlotRef | null;
-  playingSlot: { measureIndex: number; slotIndex: number } | null;
+  playingSlot: {
+    measureIndex: number;
+    slotIndex: number;
+    loopInfo?: { current: number; total: number };
+  } | null;
   useDegreeNotation: boolean;
   resolveSettings: (index: number) => EffectiveSettings;
   onSelectSlot: (measureId: string, slotIndex: number, shiftKey: boolean) => void;
@@ -486,6 +549,12 @@ export default function ChordGrid({
                               referenceLabelText={
                                 origin.referenceLabel
                                   ? `※ ${origin.referenceLabel}${loops > 1 ? ` × ${loops}` : ''}`
+                                  : null
+                              }
+                              loopProgress={
+                                playingSlot?.measureIndex === entry.measureIndex &&
+                                playingSlot.loopInfo
+                                  ? `${playingSlot.loopInfo.current}/${playingSlot.loopInfo.total}`
                                   : null
                               }
                               onSelect={(e) => onSelectSlot(origin.id, slotIndex, e.shiftKey)}

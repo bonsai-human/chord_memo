@@ -22,8 +22,11 @@ import GeneralSettingsModal from './components/GeneralSettingsModal';
 import HistoryModal from './components/HistoryModal';
 import ConfirmDialog from './components/ConfirmDialog';
 import AudioSyncModal from './components/AudioSyncModal';
+import ExportModal, { type ExportFormat } from './components/ExportModal';
+import HelpModal from './components/HelpModal';
 import YouTubePlayer from './components/YouTubePlayer';
 import * as audioStore from './lib/audioStore';
+import { toChordPro, toRechord } from './lib/exporters';
 
 const MOBILE_BREAKPOINT = 768;
 
@@ -44,6 +47,7 @@ export default function App() {
   const [playingSlot, setPlayingSlot] = useState<{
     measureIndex: number;
     slotIndex: number;
+    loopInfo?: { current: number; total: number };
   } | null>(null);
 
   const [menu, setMenu] = useState<{ kind: MenuKind; anchor: Anchor } | null>(null);
@@ -51,6 +55,8 @@ export default function App() {
   const [showGeneralSettings, setShowGeneralSettings] = useState(false);
   const [showAudioSync, setShowAudioSync] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [showExport, setShowExport] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
   const [copyBuffer, setCopyBuffer] = useState<CopyBuffer | null>(null);
 
@@ -379,7 +385,11 @@ export default function App() {
         project,
         from,
         onSlot: (event) =>
-          setPlayingSlot({ measureIndex: event.measureIndex, slotIndex: event.slotIndex }),
+          setPlayingSlot({
+            measureIndex: event.measureIndex,
+            slotIndex: event.slotIndex,
+            loopInfo: event.loopInfo,
+          }),
         onEnd: () => {
           setIsPlaying(false);
           setPlayingSlot(null);
@@ -438,16 +448,30 @@ export default function App() {
     setSelectedSlot(null);
   };
 
-  const exportProject = () => {
-    if (!project) return;
-    const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
+  const download = (content: string, extension: string, mime: string) => {
+    const blob = new Blob([content], { type: mime });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = `${project.name || 'project'}.json`;
+    anchor.download = `${project?.name || 'project'}.${extension}`;
+    // ブラウザによってはドキュメントに挿さっていないリンクのクリックが無視される。
+    // blob URL の解放もダウンロードが始まってから行う
+    document.body.appendChild(anchor);
     anchor.click();
-    URL.revokeObjectURL(url);
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
     setToast('ファイルを書き出しました');
+  };
+
+  const exportProject = (format: ExportFormat) => {
+    if (!project) return;
+    if (format === 'rechord') {
+      download(toRechord(project), 'txt', 'text/plain;charset=utf-8');
+    } else if (format === 'chordpro') {
+      download(toChordPro(project), 'cho', 'text/plain;charset=utf-8');
+    } else {
+      download(JSON.stringify(project, null, 2), 'json', 'application/json');
+    }
   };
 
   const importProject = (file: File) => {
@@ -587,7 +611,7 @@ export default function App() {
         onCreate={createProject}
         onRename={renameProject}
         onDelete={(id) => setDeleteTarget(projects.find((p) => p.id === id) ?? null)}
-        onExport={exportProject}
+        onExport={() => setShowExport(true)}
         onImport={importProject}
       />
 
@@ -599,7 +623,7 @@ export default function App() {
           isInstrumentLoading={isInstrumentLoading}
           onTogglePlay={togglePlay}
           currentProject={project}
-          onOpenHelp={() => setToast('ヘルプはこれから実装します')}
+          onOpenHelp={() => setShowHelp(true)}
           onOpenAudioSync={() => setShowAudioSync(true)}
           onOpenSettings={() => setShowGeneralSettings(true)}
           isRangeMode={isRangeMode}
@@ -700,6 +724,12 @@ export default function App() {
           onUpdate={(patch) => commit({ ...project, ...patch })}
           onClose={() => setShowGeneralSettings(false)}
         />
+      )}
+
+      {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
+
+      {showExport && (
+        <ExportModal onExport={exportProject} onClose={() => setShowExport(false)} />
       )}
 
       {showHistory && (
