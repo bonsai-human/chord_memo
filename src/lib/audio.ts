@@ -197,6 +197,72 @@ export function loadInstrument(id: InstrumentId): Promise<void> {
   return loadingPromise;
 }
 
+// --- メロディー ---
+
+let melodyInstrument: Tone.Sampler | Tone.PolySynth | null = null;
+let melodyLoadedId: InstrumentId | null = null;
+let melodyVolumeNode: Tone.Volume | null = null;
+
+/** メロディーの出口。コードとは別に音量を持つ */
+function melodyOutput(): Tone.Volume {
+  if (!melodyVolumeNode) {
+    melodyVolumeNode = new Tone.Volume(0).connect(new Tone.Limiter(-1).toDestination());
+  }
+  return melodyVolumeNode;
+}
+
+export function setMelodyVolume(value: number): void {
+  const normalized = Math.max(0, Math.min(100, value)) / 100;
+  melodyOutput().volume.value = normalized === 0 ? -Infinity : Tone.gainToDb(normalized);
+}
+
+export function loadMelodyInstrument(id: InstrumentId): Promise<void> {
+  if (melodyLoadedId === id && melodyInstrument) return Promise.resolve();
+  melodyInstrument?.dispose();
+  melodyInstrument = null;
+  melodyLoadedId = null;
+
+  const def = INSTRUMENTS[id];
+  return new Promise<void>((resolve, reject) => {
+    if (!def || Object.keys(def.urls).length === 0) {
+      melodyInstrument = new Tone.PolySynth(Tone.Synth, {
+        oscillator: { type: 'sawtooth' },
+        envelope: { attack: 0.02, decay: 0.2, sustain: 0.5, release: 0.4 },
+      }).connect(melodyOutput());
+      resolve();
+      return;
+    }
+    melodyInstrument = new Tone.Sampler({
+      urls: def.urls,
+      baseUrl: SAMPLE_BASE_URL + def.path,
+      onload: () => resolve(),
+      onerror: (e) => reject(e),
+    }).connect(melodyOutput());
+  }).then(() => {
+    melodyLoadedId = id;
+  });
+}
+
+function activeMelodyInstrument(): Tone.Sampler | Tone.PolySynth {
+  if (!melodyInstrument) {
+    melodyInstrument = new Tone.PolySynth(Tone.Synth).connect(melodyOutput());
+    melodyLoadedId = 'synth-lead';
+  }
+  return melodyInstrument;
+}
+
+/** 入力したメロディーの音を1つ鳴らす */
+export async function playMelodyNote(pitch: number): Promise<void> {
+  await Tone.start();
+  const player = activeMelodyInstrument();
+  player.releaseAll(Tone.now());
+  player.triggerAttackRelease(
+    Tone.Frequency(pitch, 'midi').toNote(),
+    '8n',
+    Tone.now() + 0.01,
+  );
+}
+
 function activeInstrument(): Tone.Sampler | Tone.PolySynth {
   if (!instrument) {
     instrument = new Tone.PolySynth(Tone.Synth).connect(output());
@@ -384,6 +450,7 @@ export function stop(): void {
   transport.cancel();
   transport.seconds = 0;
   instrument?.releaseAll();
+  melodyInstrument?.releaseAll();
   if (referencePlayer) {
     referencePlayer.stop();
     referencePlayer.unsync();
@@ -427,6 +494,8 @@ export interface PlayOptions {
   /** ここが指定され、かつループが有効なら、この範囲だけを繰り返す */
   loopRange?: { from: SlotPosition; to: SlotPosition };
   onSlot: (event: ScheduledEvent) => void;
+  /** メロディーの音が鳴るたびに呼ばれる */
+  onMelody?: (event: ScheduledEvent) => void;
   onEnd: () => void;
 }
 
@@ -436,6 +505,7 @@ export async function playGrid({
   from,
   loopRange,
   onSlot,
+  onMelody,
   onEnd,
 }: PlayOptions): Promise<void> {
   stop();
@@ -467,6 +537,18 @@ export async function playGrid({
 
   timeline.events.forEach((event) => {
     transport.schedule((time) => {
+      if (event.type === 'melody') {
+        onMelody?.(event);
+        if (event.pitch !== undefined) {
+          activeMelodyInstrument().triggerAttackRelease(
+            Tone.Frequency(event.pitch, 'midi').toNote(),
+            Math.max(0.1, event.duration - 0.02),
+            time,
+          );
+        }
+        return;
+      }
+
       if (event.type === 'metronome') {
         metronome().triggerAttackRelease(
           event.isDownbeat ? 'C5' : 'C4',

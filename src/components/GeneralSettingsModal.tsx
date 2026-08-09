@@ -167,6 +167,42 @@ export default function GeneralSettingsModal({
         </div>
 
         <div style={{ ...rowStyle, marginTop: '15px' }}>
+          <span style={{ fontSize: '0.85rem' }}>メロディーの音色</span>
+          <select
+            value={project.melodyInstrument}
+            onChange={(e) => onUpdate({ melodyInstrument: e.target.value as InstrumentId })}
+            style={{
+              background: 'var(--panel)',
+              color: 'white',
+              border: '1px solid var(--border)',
+              borderRadius: '4px',
+              padding: '6px 10px',
+            }}
+          >
+            {INSTRUMENTS.map((i) => (
+              <option key={i.id} value={i.id}>
+                {i.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div style={{ marginTop: '15px' }}>
+          <div style={rowStyle}>
+            <span style={{ fontSize: '0.85rem' }}>メロディーの音量</span>
+            <span style={{ color: '#f472b6', fontSize: '0.85rem' }}>{project.melodyVolume}%</span>
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={project.melodyVolume}
+            onChange={(e) => onUpdate({ melodyVolume: parseInt(e.target.value, 10) })}
+            style={{ accentColor: '#f472b6' }}
+          />
+        </div>
+
+        <div style={{ ...rowStyle, marginTop: '15px' }}>
           <span style={{ fontSize: '0.85rem' }}>
             曲全体を移調
             <span style={{ display: 'block', color: 'var(--text-dim)', fontSize: '0.7rem' }}>

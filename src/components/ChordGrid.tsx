@@ -1,7 +1,20 @@
 import { useMemo } from 'react';
-import type { Chord, EffectiveSettings, Measure, Project, Slot, SlotRef } from '../types';
-import { buildChunks } from '../lib/measures';
-import { getChordName, getDegreeName, getTheoreticalKeyDisplay } from '../lib/musicTheory';
+import type {
+  Chord,
+  EffectiveSettings,
+  Measure,
+  MelodySlot,
+  Project,
+  Slot,
+  SlotRef,
+} from '../types';
+import { buildChunks, melodyOf, melodyRange } from '../lib/measures';
+import {
+  getChordName,
+  getDegreeName,
+  getScaleDegree,
+  getTheoreticalKeyDisplay,
+} from '../lib/musicTheory';
 
 const DESKTOP_CONTENT_WIDTH = 968;
 const BASE_FONT_DESKTOP = 1.1;
@@ -264,6 +277,135 @@ function SlotView({
   );
 }
 
+/** メロディー面での小節の高さ。音高を縦位置で見せるため広くとる */
+const MELODY_ROW_HEIGHT = 96;
+
+interface MelodyRowProps {
+  melody: MelodySlot[];
+  /** 背後に薄く出すコード。刻みが違うので別に受け取る */
+  chordLabels: { name: string; duration: number }[];
+  measureId: string;
+  measureKey: string;
+  /** 曲中で使われている音高の範囲。縦位置の基準 */
+  range: { low: number; high: number } | null;
+  selectedIndex: number | null;
+  playingIndex: number | null;
+  inSelection: (slotIndex: number) => boolean;
+  onSelect: (slotIndex: number, shiftKey: boolean) => void;
+}
+
+/** メロディーの1小節。音高に応じて縦位置を変える */
+function MelodyRow({
+  melody,
+  chordLabels,
+  measureId,
+  measureKey,
+  range,
+  selectedIndex,
+  playingIndex,
+  inSelection,
+  onSelect,
+}: MelodyRowProps) {
+  // 音域が狭いと上下に張り付くので、最低1オクターブぶんは確保する
+  const low = range ? Math.min(range.low, range.high - 11) : 60;
+  const high = range ? Math.max(range.high, range.low + 11) : 71;
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flex: 1,
+        minWidth: 0,
+        height: `${MELODY_ROW_HEIGHT}px`,
+        position: 'relative',
+      }}
+    >
+      {/* コードとの関係が見えるよう、背後に薄く出す */}
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          display: 'flex',
+          pointerEvents: 'none',
+          zIndex: 0,
+        }}
+      >
+        {chordLabels.map((label, index) => (
+          <div
+            key={index}
+            style={{
+              flex: label.duration || 1,
+              minWidth: 0,
+              display: 'flex',
+              alignItems: 'flex-end',
+              justifyContent: 'center',
+              paddingBottom: '4px',
+              color: 'var(--text-muted)',
+              fontSize: '0.8rem',
+              fontWeight: 'bold',
+              opacity: 0.5,
+              overflow: 'hidden',
+            }}
+          >
+            {label.name}
+          </div>
+        ))}
+      </div>
+
+      {melody.map((slot, index) => {
+        const ratio = slot.pitch === null ? 0.5 : (slot.pitch - low) / (high - low);
+        const isSelected = selectedIndex === index;
+        const isPlaying = playingIndex === index;
+        return (
+          <div
+            key={index}
+            id={`melody-${measureId}-${index}`}
+            onClick={(e) => onSelect(index, e.shiftKey)}
+            style={{
+              flex: slot.duration || 1,
+              minWidth: 0,
+              position: 'relative',
+              cursor: 'pointer',
+              borderLeft: index > 0 ? '1px solid var(--border)' : 'none',
+              background: isPlaying
+                ? 'var(--selected)'
+                : inSelection(index)
+                  ? 'var(--in-range)'
+                  : 'transparent',
+              outline: isSelected ? '2px solid #6366f1' : 'none',
+              zIndex: isSelected ? 3 : 1,
+            }}
+          >
+            {slot.pitch !== null && (
+              <span
+                style={{
+                  position: 'absolute',
+                  left: '2px',
+                  right: '2px',
+                  // 高い音ほど上に置く
+                  top: `${(1 - ratio) * (MELODY_ROW_HEIGHT - 22) + 4}px`,
+                  height: '14px',
+                  borderRadius: '3px',
+                  background: slot.tie ? 'rgba(244,114,182,0.35)' : '#f472b6',
+                  color: slot.tie ? '#f472b6' : 'var(--bg)',
+                  fontSize: '0.65rem',
+                  fontWeight: 'bold',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  pointerEvents: 'none',
+                }}
+              >
+                {slot.tie ? '' : getScaleDegree(slot.pitch, measureKey)}
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 interface Props {
   project: Project;
   selectedSlot: SlotRef | null;
@@ -271,6 +413,8 @@ interface Props {
   playingSlot: {
     measureIndex: number;
     slotIndex: number;
+    /** メロディー面で光らせるマス */
+    melodyIndex?: number | null;
     loopInfo?: { current: number; total: number };
   } | null;
   useDegreeNotation: boolean;
@@ -279,6 +423,8 @@ interface Props {
   onSelectChunk: (measureId: string, anchor: { top: number; left: number }) => void;
   onToggleExpansion: (measureId: string) => void;
   isMobile: boolean;
+  /** コード面かメロディー面か */
+  editMode: 'chord' | 'melody';
 }
 
 export default function ChordGrid({
@@ -292,6 +438,7 @@ export default function ChordGrid({
   onSelectChunk,
   onToggleExpansion,
   isMobile,
+  editMode,
 }: Props) {
   const chunks = useMemo(
     () => buildChunks(project.measures, resolveSettings),
@@ -299,6 +446,7 @@ export default function ChordGrid({
   );
 
   const contentWidth = isMobile ? window.innerWidth - 32 : DESKTOP_CONTENT_WIDTH;
+  const melodyBounds = useMemo(() => melodyRange(project), [project]);
   const hasExpanded = project.measures.some((m) => m.isReferenceExpanded && m.referenceLabel);
 
   const nameOf = (chordId: string | null, key: string): string => {
@@ -430,6 +578,45 @@ export default function ChordGrid({
                     !!rendered.label &&
                     (entry.measureIndex === 0 ||
                       project.measures[entry.measureIndex - 1]?.label !== rendered.label);
+
+                  // メロディー面。コードとは別の刻みで並べる
+                  if (editMode === 'melody') {
+                    const source = referenceSource ?? rendered;
+                    return (
+                      <div className="measure-box" key={virtualId}>
+                        <MelodyRow
+                          melody={melodyOf(source, settings.timeSignature)}
+                          chordLabels={source.slots.map((slot) => ({
+                            name: nameOf(slot.chordId, settings.key),
+                            duration: slot.duration,
+                          }))}
+                          measureId={origin.id}
+                          measureKey={settings.key}
+                          range={melodyBounds}
+                          selectedIndex={
+                            selectedSlot?.measureId === origin.id ? selectedSlot.slotIndex : null
+                          }
+                          playingIndex={
+                            playingSlot?.measureIndex === entry.measureIndex
+                              ? playingSlot.melodyIndex ?? null
+                              : null
+                          }
+                          inSelection={(slotIndex) =>
+                            isInSelection(
+                              entry.measureIndex,
+                              slotIndex,
+                              project.measures,
+                              selectedSlot,
+                              selectionEnd,
+                            )
+                          }
+                          onSelect={(slotIndex, shiftKey) =>
+                            onSelectSlot(origin.id, slotIndex, shiftKey)
+                          }
+                        />
+                      </div>
+                    );
+                  }
 
                   return (
                     <div className="measure-box" key={virtualId}>

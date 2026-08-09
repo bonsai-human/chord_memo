@@ -4,6 +4,9 @@ const STORAGE_KEY = 'chord_memo_projects';
 const DEFAULT_SLOT_COUNT = 4;
 /** 演奏音の既定音量。和音が重なっても歪まない値にしてある */
 const DEFAULT_MASTER_VOLUME = 50;
+/** メロディーの既定。コードをピアノにしたときに埋もれない音色を選ぶ */
+const DEFAULT_MELODY_INSTRUMENT: InstrumentId = 'synth-lead';
+const DEFAULT_MELODY_VOLUME = 60;
 
 export function generateUUID(): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
@@ -57,6 +60,8 @@ export function createEmptyProject(): Project {
     loopEnabled: false,
     metronomeEnabled: false,
     masterVolume: DEFAULT_MASTER_VOLUME,
+    melodyInstrument: DEFAULT_MELODY_INSTRUMENT,
+    melodyVolume: DEFAULT_MELODY_VOLUME,
     audioOffset: 0,
     audioVolume: 80,
     audioEnabled: false,
@@ -122,6 +127,13 @@ function migrate(raw: any): Project {
     swing: m.swing,
     swingResolution: m.swingResolution || undefined,
     slots: m.slots.map((s: any) => ({ ...s, duration: s.duration || 1 })),
+    melody: Array.isArray(m.melody)
+      ? m.melody.map((s: any) => ({
+          pitch: typeof s.pitch === 'number' ? s.pitch : null,
+          duration: s.duration || 1,
+          tie: !!s.tie,
+        }))
+      : undefined,
   }));
 
   // 元実装は 'xylophone' を 'electric-piano' に変換していたが、その音色は定義に存在せず
@@ -142,6 +154,8 @@ function migrate(raw: any): Project {
     metronomeEnabled: raw.metronomeEnabled ?? false,
     // 以前は演奏音と同期音源が audioVolume を共用していた。演奏音は分離する
     masterVolume: raw.masterVolume ?? DEFAULT_MASTER_VOLUME,
+    melodyInstrument: raw.melodyInstrument || DEFAULT_MELODY_INSTRUMENT,
+    melodyVolume: raw.melodyVolume ?? DEFAULT_MELODY_VOLUME,
     audioUrl: raw.audioUrl || undefined,
     audioOffset: raw.audioOffset ?? 0,
     audioVolume: raw.audioVolume ?? 80,
