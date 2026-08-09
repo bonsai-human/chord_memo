@@ -9,7 +9,13 @@ import {
   type RhythmDivision,
 } from './lib/measures';
 import * as audio from './lib/audio';
-import { copyRange, pasteBuffer, type CopyBuffer, type PasteMode } from './lib/clipboard';
+import {
+  copyRange,
+  pasteBuffer,
+  resolveRange,
+  type CopyBuffer,
+  type PasteMode,
+} from './lib/clipboard';
 import { useHistory } from './hooks/useHistory';
 import Header from './components/Header';
 import Sidebar from './components/Sidebar';
@@ -115,10 +121,10 @@ export default function App() {
     };
   }, [instrumentId]);
 
-  const audioVolume = project?.audioVolume;
+  const masterVolume = project?.masterVolume;
   useEffect(() => {
-    if (audioVolume !== undefined) audio.setVolume(audioVolume);
-  }, [audioVolume]);
+    if (masterVolume !== undefined) audio.setVolume(masterVolume);
+  }, [masterVolume]);
 
   useEffect(() => () => audio.stop(), []);
 
@@ -283,30 +289,42 @@ export default function App() {
 
   const deleteChordOnly = useCallback(() => {
     if (!project || !selectedSlot) return;
+    const range = resolveRange(project, selectedSlot, selectionEnd);
+    if (!range) return;
+
     history.push(project, 'コード削除');
-    const measures = project.measures.map((m) => {
-      if (m.id !== selectedSlot.measureId) return m;
+    const measures = project.measures.map((m, index) => {
+      if (index < range.from || index > range.to) return m;
+      const begin = index === range.from ? range.firstSlot : 0;
+      const end = index === range.to ? range.lastSlot : m.slots.length - 1;
       return {
         ...m,
-        slots: m.slots.map((s, i) => (i === selectedSlot.slotIndex ? { ...s, chordId: null } : s)),
+        slots: m.slots.map((s, i) => (i >= begin && i <= end ? { ...s, chordId: null } : s)),
       };
     });
+
     commit({ ...project, measures });
-    setToast('コードを削除しました');
-  }, [project, selectedSlot, history, commit]);
+    setSelectionEnd(null);
+    setToast(selectionEnd ? '選択範囲のコードを削除しました' : 'コードを削除しました');
+  }, [project, selectedSlot, selectionEnd, history, commit]);
 
   const deleteMeasure = useCallback(() => {
     if (!project || !selectedSlot) return;
-    if (project.measures.length <= 1) {
+    const range = resolveRange(project, selectedSlot, selectionEnd);
+    if (!range) return;
+
+    const targets = new Set(project.measures.slice(range.from, range.to + 1).map((m) => m.id));
+    if (targets.size >= project.measures.length) {
       setToast('全ての小節を削除することはできません');
       return;
     }
+
     history.push(project, '小節削除');
-    const measures = project.measures.filter((m) => m.id !== selectedSlot.measureId);
-    commit({ ...project, measures });
+    commit({ ...project, measures: project.measures.filter((m) => !targets.has(m.id)) });
     setSelectedSlot(null);
-    setToast('小節を削除しました');
-  }, [project, selectedSlot, history, commit]);
+    setSelectionEnd(null);
+    setToast(targets.size > 1 ? `${targets.size} 小節を削除しました` : '小節を削除しました');
+  }, [project, selectedSlot, selectionEnd, history, commit]);
 
   const applyRhythm = useCallback(
     (division: RhythmDivision) => {
@@ -630,7 +648,9 @@ export default function App() {
           onToggleRangeMode={() => {
             const next = !isRangeMode;
             setIsRangeMode(next);
-            if (!next) setSelectionEnd(null);
+            setSelectionEnd(null);
+            // 「1回目のタップで始点」にするため、入る前の選択は持ち込まない
+            if (next) setSelectedSlot(null);
           }}
         />
 

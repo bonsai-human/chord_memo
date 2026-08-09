@@ -78,8 +78,14 @@ export function useLongPress({ onLongPress, onClick, threshold = THRESHOLD_MS }:
       if (touched.current) return;
       if (e.button === 0) start(e.clientX, e.clientY);
     },
-    onMouseUp: () => {
+    onMouseUp: (e: React.MouseEvent) => {
       if (touched.current) return;
+      // 右クリックはメニューを開くだけ。ここで finish() すると
+      // メニューと同時に通常のクリック動作まで走ってしまう
+      if (e.button !== 0) {
+        cancel();
+        return;
+      }
       finish();
     },
     onMouseMove: (e: React.MouseEvent) => {
@@ -96,6 +102,7 @@ export function useLongPress({ onLongPress, onClick, threshold = THRESHOLD_MS }:
       e.preventDefault();
       if (touched.current) return;
       cancel();
+      fired.current = true;
       onLongPress();
     },
     style: {
