@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Chord, Measure, Project, SlotRef } from './types';
 import * as storage from './lib/storage';
 import {
@@ -67,6 +67,7 @@ export default function App() {
   const [copyBuffer, setCopyBuffer] = useState<CopyBuffer | null>(null);
 
   const history = useHistory();
+  const gridScrollRef = useRef<HTMLDivElement>(null);
 
   // --- 初期化 ---
 
@@ -99,6 +100,28 @@ export default function App() {
     const timer = setTimeout(() => setToast(null), 2500);
     return () => clearTimeout(timer);
   }, [toast]);
+
+  // 再生位置が画面の外へ出たらグリッドを追従させる。
+  // 参照小節を展開中は同じ id のスロットが複数並ぶため、先頭のものが対象になる
+  const playingMeasureIndex = playingSlot?.measureIndex;
+  const playingSlotIndex = playingSlot?.slotIndex;
+  useEffect(() => {
+    if (!isPlaying || playingMeasureIndex === undefined || playingSlotIndex === undefined) return;
+    const container = gridScrollRef.current;
+    const measure = project?.measures[playingMeasureIndex];
+    if (!container || !measure) return;
+
+    const slot = document.getElementById(`slot-${measure.id}-${playingSlotIndex}`);
+    if (!slot) return;
+
+    const view = container.getBoundingClientRect();
+    const target = slot.getBoundingClientRect();
+    // 端に達してから動かすと気づきにくいので、1行ぶん手前で追従を始める
+    const margin = target.height * 1.5;
+    if (target.top >= view.top + margin && target.bottom <= view.bottom - margin) return;
+
+    container.scrollBy({ top: target.top - view.top - view.height / 3, behavior: 'smooth' });
+  }, [isPlaying, playingMeasureIndex, playingSlotIndex, project]);
 
   // --- 音源 ---
 
@@ -654,7 +677,7 @@ export default function App() {
           }}
         />
 
-        <div style={{ flex: 1, overflowY: 'auto', background: 'var(--bg-grid)' }}>
+        <div ref={gridScrollRef} style={{ flex: 1, overflowY: 'auto', background: 'var(--bg-grid)' }}>
           <ChordGrid
             project={project}
             selectedSlot={selectedSlot}
