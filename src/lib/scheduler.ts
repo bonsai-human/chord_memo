@@ -179,6 +179,38 @@ export function buildTimeline(project: Project, options: Options = {}): Timeline
   return { events, totalDuration: elapsed };
 }
 
+export interface SlotPosition {
+  measureIndex: number;
+  slotIndex: number;
+}
+
+/**
+ * 選択範囲に対応する再生時間の範囲を返す（部分ループ用）。
+ * 終端はコードの duration ではなく次のスロットの開始時刻で測る。
+ * コードのイベントは後続の空スロットぶんまで伸ばされているため
+ */
+export function rangeBounds(
+  timeline: Timeline,
+  from: SlotPosition,
+  to: SlotPosition,
+): { start: number; end: number } {
+  const events = timeline.events.filter((e) => e.type !== 'metronome');
+  const at = (position: SlotPosition) =>
+    events.findIndex(
+      (e) => e.measureIndex === position.measureIndex && e.slotIndex === position.slotIndex,
+    );
+
+  const startIndex = at(from);
+  const endIndex = at(to);
+  const start = startIndex >= 0 ? events[startIndex].startTime : 0;
+  const end =
+    endIndex >= 0 && endIndex + 1 < events.length
+      ? events[endIndex + 1].startTime
+      : timeline.totalDuration;
+
+  return { start, end: Math.max(end, start + 0.1) };
+}
+
 /** 指定した表示位置のイベント開始時刻を返す（途中再生用） */
 export function timeOf(timeline: Timeline, measureIndex: number, slotIndex: number): number {
   const hit = timeline.events.find(

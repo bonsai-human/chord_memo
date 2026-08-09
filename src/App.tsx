@@ -5,6 +5,7 @@ import {
   normalizeProject,
   resolveMeasureSettings,
   splitRhythm,
+  transposeProject,
   updateMeasureSettings,
   type RhythmDivision,
 } from './lib/measures';
@@ -415,10 +416,21 @@ export default function App() {
       return;
     }
 
-    // 選択中の拍があればそこから鳴らす
-    const from =
-      selectedSlot && selectedMeasureIndex >= 0
+    // 範囲を選んでいればその先頭から。単独選択ならその拍から鳴らす
+    const range = selectedSlot ? resolveRange(project, selectedSlot, selectionEnd) : null;
+    const from = range
+      ? { measureIndex: range.from, slotIndex: range.firstSlot }
+      : selectedSlot && selectedMeasureIndex >= 0
         ? { measureIndex: selectedMeasureIndex, slotIndex: selectedSlot.slotIndex }
+        : undefined;
+
+    // 範囲を選んでいるときのループは、その範囲だけを繰り返す
+    const loopRange =
+      range && selectionEnd
+        ? {
+            from: { measureIndex: range.from, slotIndex: range.firstSlot },
+            to: { measureIndex: range.to, slotIndex: range.lastSlot },
+          }
         : undefined;
 
     setIsPlaying(true);
@@ -426,6 +438,7 @@ export default function App() {
       .playGrid({
         project,
         from,
+        loopRange,
         onSlot: (event) =>
           setPlayingSlot({
             measureIndex: event.measureIndex,
@@ -443,7 +456,7 @@ export default function App() {
         setIsPlaying(false);
         setPlayingSlot(null);
       });
-  }, [project, isPlaying, selectedSlot, selectedMeasureIndex, stopPlayback]);
+  }, [project, isPlaying, selectedSlot, selectionEnd, selectedMeasureIndex, stopPlayback]);
 
   const toggleExpansion = useCallback(
     (measureId: string) => {
@@ -464,6 +477,37 @@ export default function App() {
     setProjects((list) => [...list, created]);
     setProject(created);
     setSelectedSlot(null);
+  };
+
+  const duplicateProject = (id: string) => {
+    const source = projects.find((p) => p.id === id);
+    if (!source) return;
+    const copy = normalizeProject({
+      ...(JSON.parse(JSON.stringify(source)) as Project),
+      id: storage.generateUUID(),
+      name: `${source.name} のコピー`,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    storage.saveProject(copy);
+    setProjects((list) => [...list, copy]);
+    setProject(copy);
+    setSelectedSlot(null);
+    setSelectionEnd(null);
+
+    // 同期音源も引き継ぐ。実体は IndexedDB にあるので別途コピーする
+    audioStore
+      .getAudio(id)
+      .then((blob) => blob && audioStore.saveAudio(copy.id, blob))
+      .catch((e) => console.error('Failed to copy audio:', e));
+
+    setToast('プロジェクトを複製しました');
+  };
+
+  const transposeWholeProject = (semitones: number) => {
+    if (!project) return;
+    history.push(project, '曲全体を移調');
+    commit(transposeProject(project, semitones));
   };
 
   const renameProject = (id: string, name: string) => {
@@ -653,6 +697,7 @@ export default function App() {
         }}
         onCreate={createProject}
         onRename={renameProject}
+        onDuplicate={duplicateProject}
         onDelete={(id) => setDeleteTarget(projects.find((p) => p.id === id) ?? null)}
         onExport={() => setShowExport(true)}
         onImport={importProject}
@@ -767,6 +812,7 @@ export default function App() {
           useDegreeNotation={useDegreeNotation}
           onChangeDegreeNotation={setUseDegreeNotation}
           onUpdate={(patch) => commit({ ...project, ...patch })}
+          onTranspose={transposeWholeProject}
           onClose={() => setShowGeneralSettings(false)}
         />
       )}

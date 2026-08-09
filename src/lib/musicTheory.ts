@@ -38,6 +38,9 @@ export function rootOffset(name: string): number {
   return PITCH_CLASS[name.replace(/m$/, '')] ?? 0;
 }
 
+/** キー設定で選べるメジャーキーの一覧（ピッチクラス順） */
+export const MAJOR_KEYS = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'];
+
 export const RELATIVE_MINOR: Record<string, string> = {
   C: 'Am', Db: 'Bbm', D: 'Bm', Eb: 'Cm', E: 'C#m', F: 'Dm',
   Gb: 'Ebm', G: 'Em', Ab: 'Fm', A: 'F#m', Bb: 'Gm', B: 'G#m',
@@ -102,6 +105,21 @@ export function getNoteNames(midiList: number[], key = 'C', accidental?: Acciden
 export function getTranspositionOffset(key: string): number {
   const isMinor = key.endsWith('m');
   return (rootOffset(key) + (isMinor ? 3 : 0)) % 12;
+}
+
+/** キー名を半音ぶん移調する。メジャー / マイナーの別は保つ */
+export function transposeKey(key: string, semitones: number): string {
+  const isMinor = key.endsWith('m');
+  const pitch = (((rootOffset(key) + semitones) % 12) + 12) % 12;
+  if (!isMinor) return MAJOR_KEYS[pitch];
+  return RELATIVE_MINOR[MAJOR_KEYS[(pitch + 3) % 12]];
+}
+
+/** その音がキーの音階に含まれるか（メジャー / 自然短音階） */
+export function isInKey(pitch: number, key: string): boolean {
+  const degrees = key.endsWith('m') ? MINOR_DEGREES : MAJOR_DEGREES;
+  const tonic = rootOffset(key);
+  return degrees.includes((((pitch - tonic) % 12) + 12) % 12);
 }
 
 /** コードの構成音（ルートからの半音インターバル） */

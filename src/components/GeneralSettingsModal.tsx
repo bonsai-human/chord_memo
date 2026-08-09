@@ -20,6 +20,7 @@ interface Props {
   useDegreeNotation: boolean;
   onChangeDegreeNotation: (value: boolean) => void;
   onUpdate: (patch: Partial<Project>) => void;
+  onTranspose: (semitones: number) => void;
   onClose: () => void;
 }
 
@@ -65,6 +66,7 @@ export default function GeneralSettingsModal({
   useDegreeNotation,
   onChangeDegreeNotation,
   onUpdate,
+  onTranspose,
   onClose,
 }: Props) {
   return (
@@ -162,6 +164,33 @@ export default function GeneralSettingsModal({
             value={project.masterVolume}
             onChange={(e) => onUpdate({ masterVolume: parseInt(e.target.value, 10) })}
           />
+        </div>
+
+        <div style={{ ...rowStyle, marginTop: '15px' }}>
+          <span style={{ fontSize: '0.85rem' }}>
+            曲全体を移調
+            <span style={{ display: 'block', color: 'var(--text-dim)', fontSize: '0.7rem' }}>
+              キー指定とコードをまとめて動かします
+            </span>
+          </span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <button className="step-btn" title="半音下げる" onClick={() => onTranspose(-1)}>
+              ♭
+            </button>
+            <span
+              style={{
+                color: 'var(--accent)',
+                fontWeight: 'bold',
+                minWidth: '38px',
+                textAlign: 'center',
+              }}
+            >
+              {project.key}
+            </span>
+            <button className="step-btn" title="半音上げる" onClick={() => onTranspose(1)}>
+              ♯
+            </button>
+          </span>
         </div>
 
         <div style={{ marginTop: '15px' }}>

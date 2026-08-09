@@ -1,6 +1,11 @@
 import type { Chord, EffectiveSettings, Project, Slot, SlotRef } from '../types';
 import { measureLength, normalizeProject, resolveMeasureSettings } from './measures';
-import { getPitchClassName, rootOffset } from './musicTheory';
+import {
+  getPitchClassName,
+  getTranspositionOffset,
+  rootOffset,
+  transposeKey,
+} from './musicTheory';
 import { cloneChord, createEmptyMeasure, generateUUID } from './storage';
 
 const EPSILON = 0.0001;
@@ -147,6 +152,16 @@ export function pasteBuffer(
   const idMap: Record<string, string> = {};
   let cursor = targetIndex;
 
+  // 移調量は範囲の先頭だけで決め、全小節に同じ量を使う。
+  // 小節ごとに測り直すと、範囲の途中の転調が貼り付け先のキーへ潰れてしまう
+  const semitones =
+    mode === 'transposed'
+      ? (getTranspositionOffset(resolveMeasureSettings(targetIndex, project, measures).key) -
+          getTranspositionOffset(buffer.measures[0]?.effectiveKey || 'C') +
+          12) %
+        12
+      : 0;
+
   buffer.measures.forEach((copied, order) => {
     // 書き込み先が足りなければ末尾に空小節を足す
     while (cursor >= measures.length) {
@@ -163,19 +178,23 @@ export function pasteBuffer(
     }
 
     const settings = resolveMeasureSettings(cursor, project, measures);
-    const semitones =
-      mode === 'transposed'
-        ? (rootOffset(settings.key) - rootOffset(copied.effectiveKey) + 12) % 12
-        : 0;
+
+    // この小節に持ち込むキー指定。移調貼り付けでは移調した名前になる
+    const pastedKey =
+      copied.metadata.key && mode === 'transposed'
+        ? transposeKey(copied.metadata.key, semitones)
+        : copied.metadata.key;
+    // 音名の綴りは、その位置で実際に効くキーに従う
+    const spellingKey = pastedKey ?? settings.key;
 
     const mapChordId = (id: string | null): string | null => {
       if (!id) return null;
-      const cacheKey = mode === 'transposed' ? `${id}_T${semitones}` : id;
+      const cacheKey = mode === 'transposed' ? `${id}_T${semitones}_${spellingKey}` : id;
       if (!idMap[cacheKey]) {
         const newId = generateUUID();
         const source = buffer.chords[id];
         if (source) {
-          const chord = mode === 'transposed' ? transposeChord(source, semitones, settings.key) : source;
+          const chord = mode === 'transposed' ? transposeChord(source, semitones, spellingKey) : source;
           chords[newId] = { ...chord, id: newId };
         }
         idMap[cacheKey] = newId;
@@ -253,11 +272,18 @@ export function pasteBuffer(
       };
     }
 
-    // そのまま貼り付けのときは、元の小節設定を貼り付け先へ持ち込む
-    if (mode === 'normal') {
+    // 元の小節設定を貼り付け先へ持ち込む。
+    // 移調貼り付けでも、範囲の途中の転調・テンポ変更・拍子変更は保つ
+    // （キーは移調後の名前になる。先頭のキーは貼り付け先と一致するので落ちる）
+    {
       const current = resolveMeasureSettings(cursor, project, measures);
-      const { key, tempo, timeSignature } = copied.metadata;
-      if (key && key !== current.key) measures[cursor].key = key;
+      const { tempo, timeSignature } = copied.metadata;
+      // 移調貼り付けの先頭は貼り付け先のキーに合わせるのが目的なので、
+      // コピー元のキーで上書きしない（平行調どうしでも名前は違うため）
+      const keepDestinationKey = mode === 'transposed' && order === 0;
+      if (pastedKey && !keepDestinationKey && pastedKey !== current.key) {
+        measures[cursor].key = pastedKey;
+      }
       if (tempo && tempo !== current.tempo) measures[cursor].tempo = tempo;
       if (
         timeSignature &&

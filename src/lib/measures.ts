@@ -1,5 +1,10 @@
-import type { EffectiveSettings, Measure, Project } from '../types';
-import { getPitchClassName, getTranspositionOffset, rootOffset } from './musicTheory';
+import type { Chord, EffectiveSettings, Measure, Project } from '../types';
+import {
+  getPitchClassName,
+  getTranspositionOffset,
+  rootOffset,
+  transposeKey,
+} from './musicTheory';
 import { cleanupOrphanedChords, createEmptyMeasure, generateUUID } from './storage';
 
 /** 内容を持つ最後の小節の後ろに常に確保する空小節の数 */
@@ -197,6 +202,56 @@ export function updateMeasureSettings(
   }
 
   return normalizeProject({ ...project, measures, chords });
+}
+
+/**
+ * 曲全体を移調する。キー指定と、そこにぶら下がるコードをまとめて動かす。
+ * 音名の綴りは移調後のキーに従う。
+ */
+export function transposeProject(project: Project, semitones: number): Project {
+  const shift = (((semitones % 12) + 12) % 12);
+  if (shift === 0) return project;
+
+  // 先にキー指定を移調しておく。コードの綴りは移調後のキーで決まる
+  const keyed = project.measures.map((measure) => ({
+    ...measure,
+    key: measure.key ? transposeKey(measure.key, shift) : measure.key,
+  }));
+  const shifted: Project = {
+    ...project,
+    key: transposeKey(project.key, shift),
+    measures: keyed,
+  };
+
+  const chords: Record<string, Chord> = {};
+  /** 同じコードでも小節のキーが違えば綴りが変わるので、キーごとに作る */
+  const remapped: Record<string, string> = {};
+
+  const measures = keyed.map((measure, index) => {
+    const key = resolveMeasureSettings(index, shifted, keyed).key;
+    const slots = measure.slots.map((slot) => {
+      if (!slot.chordId) return slot;
+      const cacheKey = `${slot.chordId}_${key}`;
+      if (!remapped[cacheKey]) {
+        const chord = project.chords[slot.chordId];
+        if (!chord) return slot;
+        const id = generateUUID();
+        chords[id] = {
+          ...chord,
+          id,
+          root: getPitchClassName(rootOffset(chord.root) + shift, key),
+          onChord: chord.onChord
+            ? getPitchClassName(rootOffset(chord.onChord) + shift, key)
+            : chord.onChord,
+        };
+        remapped[cacheKey] = id;
+      }
+      return { ...slot, chordId: remapped[cacheKey] };
+    });
+    return { ...measure, slots };
+  });
+
+  return normalizeProject({ ...shifted, measures, chords });
 }
 
 export type RhythmDivision = 'div4' | 'div8' | 'div16' | 'div4t' | 'div8t';

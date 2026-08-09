@@ -3,7 +3,14 @@ import type { Chord, InstrumentId, Project } from '../types';
 import { getIntervals, rootOffset } from './musicTheory';
 import { INSTRUMENTS, SAMPLE_BASE_URL } from './instruments';
 import * as youtube from './youtube';
-import { buildTimeline, timeOf, type ScheduledEvent, type Timeline } from './scheduler';
+import {
+  buildTimeline,
+  rangeBounds,
+  timeOf,
+  type ScheduledEvent,
+  type SlotPosition,
+  type Timeline,
+} from './scheduler';
 
 /** ベース音を置くオクターブ（MIDI） */
 const BASS_BASE = 36;
@@ -198,50 +205,176 @@ function activeInstrument(): Tone.Sampler | Tone.PolySynth {
   return instrument;
 }
 
+/** 音域内でそのピッチクラスを鳴らせる MIDI 番号を全部並べる */
+function candidatesInRange(pitch: number, min: number, max: number): number[] {
+  const pitchClass = ((pitch % 12) + 12) % 12;
+  const first = min + ((((pitchClass - min) % 12) + 12) % 12);
+  const notes: number[] = [];
+  for (let note = first; note <= max; note += 12) notes.push(note);
+  return notes;
+}
+
+/** 音域の中央にいちばん近い候補を選ぶ（前のコードが無いとき） */
+function nearestToCenter(pitch: number, min: number, max: number): number {
+  const center = (min + max) / 2;
+  const candidates = candidatesInRange(pitch, min, max);
+  if (candidates.length === 0) return pitch;
+  return candidates.reduce((best, note) =>
+    Math.abs(note - center) < Math.abs(best - center) ? note : best,
+  );
+}
+
 /**
- * コードを鳴らす音の並びを決める。
- * ベース音は固定で、コード音だけ音域の中心へ畳み込む。
+ * 前のコードのボイシングに近い高さを選ぶ。
+ * 各構成音について、音域内の候補のうち直前のどれかの音にいちばん近いものを採る。
+ * 共通音は同じ高さのまま残り、その他も最短距離で動く。
  */
-export function buildVoicing(chord: Chord, voicing: VoicingOptions): number[] {
+function leadFrom(pitch: number, previous: number[], min: number, max: number): number {
+  const center = (min + max) / 2;
+  const candidates = candidatesInRange(pitch, min, max);
+  if (candidates.length === 0) return pitch;
+
+  let best = candidates[0];
+  let bestScore = Infinity;
+  for (const note of candidates) {
+    const movement = Math.min(...previous.map((p) => Math.abs(note - p)));
+    // 動く量が同じなら音域の中央に近い方を選ぶ
+    const score = movement + Math.abs(note - center) / 1000;
+    if (score < bestScore) {
+      bestScore = score;
+      best = note;
+    }
+  }
+  return best;
+}
+
+/**
+ * 転回形の候補を並べる。
+ * 下から順に積んだ形を1音ずつ回し、オクターブ単位でずらしたものを候補にする。
+ * 音ごとに独立して高さを決めると和音が団子になり、C と B が半音で
+ * ぶつかるような並びが出てしまうため、積み方ごと選ぶ。
+ */
+function voicingCandidates(pitchClasses: number[], min: number, max: number): number[][] {
+  const unique = Array.from(new Set(pitchClasses));
+  const candidates: number[][] = [];
+
+  for (let rotation = 0; rotation < unique.length; rotation++) {
+    const order = [...unique.slice(rotation), ...unique.slice(0, rotation)];
+    const stacked: number[] = [];
+    let last = -Infinity;
+    for (const pitchClass of order) {
+      let note = min + ((((pitchClass - min) % 12) + 12) % 12);
+      while (note <= last) note += 12;
+      stacked.push(note);
+      last = note;
+    }
+    for (let shift = -24; shift <= 24; shift += 12) {
+      const notes = stacked.map((note) => note + shift);
+      if (notes[0] >= min && notes[notes.length - 1] <= max) candidates.push(notes);
+    }
+  }
+  return candidates;
+}
+
+const average = (notes: number[]) => notes.reduce((sum, n) => sum + n, 0) / notes.length;
+/** いちばん低い音と高い音の開き。広いほど和音がばらけて聞こえる */
+const spread = (notes: number[]) => notes[notes.length - 1] - notes[0];
+
+/** 前のボイシングから、各音がどれだけ動いたかの合計 */
+function movementFrom(notes: number[], previous: number[]): number {
+  return notes.reduce(
+    (sum, note) => sum + Math.min(...previous.map((p) => Math.abs(note - p))),
+    0,
+  );
+}
+
+/** ベース音とコード音を分けて組み立てる */
+export function buildVoicingParts(
+  chord: Chord,
+  voicing: VoicingOptions,
+  previousTones?: number[],
+): { bass: number; tones: number[] } {
   const root = rootOffset(chord.root);
   const bass = (chord.onChord ? rootOffset(chord.onChord) : root) + BASS_BASE;
-  let notes = getIntervals(chord).map((i) => root + i + CHORD_BASE);
+  const intervals = getIntervals(chord);
+  const raw = intervals.map((i) => root + i + CHORD_BASE);
+  if (!voicing.optimize || raw.length === 0) return { bass, tones: raw };
 
-  if (voicing.optimize) {
-    const center = (voicing.min + voicing.max) / 2;
-    notes = notes.map((note) => {
-      let value = note;
-      while (value < voicing.min) value += 12;
-      while (value > voicing.max) value -= 12;
+  const center = (voicing.min + voicing.max) / 2;
+  const hasPrevious = !!previousTones && previousTones.length > 0;
 
-      let best = value;
-      if (value - 12 >= voicing.min && Math.abs(value - 12 - center) < Math.abs(best - center)) {
-        best = value - 12;
-      }
-      if (value + 12 <= voicing.max && Math.abs(value + 12 - center) < Math.abs(best - center)) {
-        best = value + 12;
-      }
-      return best;
-    });
-    notes.sort((a, b) => a - b);
+  // 候補は「転回形を積んだ形」と「音ごとに寄せた形」の両方。
+  // 転回形だけだと、音数の多いコードで前のコードから離れた形が選ばれてしまう
+  const candidates = voicingCandidates(
+    intervals.map((i) => (((root + i) % 12) + 12) % 12),
+    voicing.min,
+    voicing.max,
+  );
+  candidates.push(
+    raw.map((pitch) => nearestToCenter(pitch, voicing.min, voicing.max)).sort((a, b) => a - b),
+  );
+  if (hasPrevious) {
+    candidates.push(
+      raw
+        .map((pitch) => leadFrom(pitch, previousTones!, voicing.min, voicing.max))
+        .sort((a, b) => a - b),
+    );
+  }
+  let best = candidates[0];
+  let bestScore = Infinity;
+  for (const notes of candidates) {
+    // 前のコードがあれば動きの少なさで、無ければ和音の詰まり具合で選ぶ。
+    // どちらも同点なら音域の中央に近い方
+    const score = hasPrevious
+      ? movementFrom(notes, previousTones!) + spread(notes) / 100
+      : spread(notes) + Math.abs(average(notes) - center) / 10;
+    const total = score + Math.abs(average(notes) - center) / 1000;
+    if (total < bestScore) {
+      bestScore = total;
+      best = notes;
+    }
   }
 
-  return Array.from(new Set([bass, ...notes])).sort((a, b) => a - b);
+  return { bass, tones: best };
+}
+
+/**
+ * コードを鳴らす音の並びを決める。
+ * ベース音は固定で、コード音だけ音域内へ収める。
+ * previousTones を渡すと、前のコードから動きが小さくなる高さを選ぶ。
+ */
+export function buildVoicing(
+  chord: Chord,
+  voicing: VoicingOptions,
+  previousTones?: number[],
+): number[] {
+  const { bass, tones } = buildVoicingParts(chord, voicing, previousTones);
+  return Array.from(new Set([bass, ...tones])).sort((a, b) => a - b);
 }
 
 const toNoteNames = (midi: number[]): string[] =>
   midi.map((m) => Tone.Frequency(m, 'midi').toNote());
+
+/** 単発プレビューでも、続けて鳴らしたときにつながるよう直前の高さを覚えておく */
+let previewTones: number[] = [];
 
 /** 単発プレビュー */
 export async function playChord(chord: Chord, voicing: VoicingOptions): Promise<void> {
   await Tone.start();
   const player = activeInstrument();
   player.releaseAll(Tone.now());
-  if (chord.isNC) return;
-  player.triggerAttackRelease(toNoteNames(buildVoicing(chord, voicing)), '2n', Tone.now() + 0.01);
+  if (chord.isNC) {
+    previewTones = [];
+    return;
+  }
+  const { bass, tones } = buildVoicingParts(chord, voicing, previewTones);
+  previewTones = tones;
+  const notes = Array.from(new Set([bass, ...tones])).sort((a, b) => a - b);
+  player.triggerAttackRelease(toNoteNames(notes), '2n', Tone.now() + 0.01);
 }
 
 export function stop(): void {
+  previewTones = [];
   if (loopHandle !== null) {
     cancelAnimationFrame(loopHandle);
     loopHandle = null;
@@ -268,6 +401,7 @@ function chaseCurrentChord(
   at: number,
   when: number,
   voicing: VoicingOptions,
+  voicings: Map<ScheduledEvent, number[]>,
 ): void {
   const active = timeline.events.find(
     (e) =>
@@ -280,7 +414,7 @@ function chaseCurrentChord(
   if (!active?.chord) return;
   const remaining = active.startTime + active.duration - at;
   activeInstrument().triggerAttackRelease(
-    toNoteNames(buildVoicing(active.chord, voicing)),
+    toNoteNames(voicings.get(active) ?? buildVoicing(active.chord, voicing)),
     Math.max(0.1, remaining - 0.01),
     when,
   );
@@ -290,12 +424,20 @@ export interface PlayOptions {
   project: Project;
   /** 再生を始める位置（表示上の小節とスロット） */
   from?: { measureIndex: number; slotIndex: number };
+  /** ここが指定され、かつループが有効なら、この範囲だけを繰り返す */
+  loopRange?: { from: SlotPosition; to: SlotPosition };
   onSlot: (event: ScheduledEvent) => void;
   onEnd: () => void;
 }
 
 /** グリッド全体を再生する */
-export async function playGrid({ project, from, onSlot, onEnd }: PlayOptions): Promise<void> {
+export async function playGrid({
+  project,
+  from,
+  loopRange,
+  onSlot,
+  onEnd,
+}: PlayOptions): Promise<void> {
   stop();
   await Tone.start();
 
@@ -311,6 +453,17 @@ export async function playGrid({ project, from, onSlot, onEnd }: PlayOptions): P
 
   const startAt = from ? timeOf(timeline, from.measureIndex, from.slotIndex) : 0;
   const player = activeInstrument();
+
+  // ボイシングは時間順に決める。前のコードからの動きを見るため、
+  // 再生時のコールバックではなくここでまとめて求めておく
+  const voicings = new Map<ScheduledEvent, number[]>();
+  let previousTones: number[] = [];
+  timeline.events.forEach((event) => {
+    if (event.type !== 'chord' || !event.chord || event.chord.isNC) return;
+    const { bass, tones } = buildVoicingParts(event.chord, voicing, previousTones);
+    previousTones = tones;
+    voicings.set(event, Array.from(new Set([bass, ...tones])).sort((a, b) => a - b));
+  });
 
   timeline.events.forEach((event) => {
     transport.schedule((time) => {
@@ -329,7 +482,7 @@ export async function playGrid({ project, from, onSlot, onEnd }: PlayOptions): P
       if (event.type !== 'chord') return;
       if (event.chord && !event.chord.isNC) {
         player.triggerAttackRelease(
-          toNoteNames(buildVoicing(event.chord, voicing)),
+          toNoteNames(voicings.get(event) ?? buildVoicing(event.chord, voicing)),
           Math.max(0.1, event.duration - 0.05),
           time,
         );
@@ -339,10 +492,13 @@ export async function playGrid({ project, from, onSlot, onEnd }: PlayOptions): P
     }, event.startTime);
   });
 
+  // 範囲を選んでいれば、その範囲だけを繰り返す
+  const bounds = loopRange ? rangeBounds(timeline, loopRange.from, loopRange.to) : null;
+
   if (project.loopEnabled) {
     transport.loop = true;
-    transport.loopStart = 0;
-    transport.loopEnd = timeline.totalDuration;
+    transport.loopStart = bounds ? bounds.start : 0;
+    transport.loopEnd = bounds ? bounds.end : timeline.totalDuration;
   } else {
     transport.loop = false;
     // stop() は transport.cancel() を呼ぶため、コールバックの外へ逃がす
@@ -360,7 +516,7 @@ export async function playGrid({ project, from, onSlot, onEnd }: PlayOptions): P
   };
 
   if (project.useYoutubeAudio && project.youtubeUrl) {
-    await startWithYouTube({ project, timeline, startAt, voicing, finish });
+    await startWithYouTube({ project, timeline, startAt, voicing, voicings, finish });
     return;
   }
 
@@ -372,7 +528,7 @@ export async function playGrid({ project, from, onSlot, onEnd }: PlayOptions): P
   }
 
   const now = Tone.now();
-  if (startAt > 0) chaseCurrentChord(timeline, startAt, now, voicing);
+  if (startAt > 0) chaseCurrentChord(timeline, startAt, now, voicing, voicings);
   transport.seconds = startAt;
   transport.start(now + 0.05, startAt);
 }
@@ -382,6 +538,8 @@ interface SyncArgs {
   timeline: Timeline;
   startAt: number;
   voicing: VoicingOptions;
+  /** 時間順に決めておいたボイシング */
+  voicings: Map<ScheduledEvent, number[]>;
   finish: () => void;
 }
 
@@ -395,6 +553,7 @@ async function startWithYouTube({
   timeline,
   startAt,
   voicing,
+  voicings,
   finish,
 }: SyncArgs): Promise<void> {
   const transport = Tone.getTransport();
@@ -417,7 +576,7 @@ async function startWithYouTube({
       if (!started) {
         const now = Tone.now();
         const at = Math.max(startAt, videoTime - offset);
-        chaseCurrentChord(timeline, at, now, voicing);
+        chaseCurrentChord(timeline, at, now, voicing, voicings);
         transport.seconds = at;
         transport.start(now + 0.02, at);
         started = true;

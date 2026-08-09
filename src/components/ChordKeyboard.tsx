@@ -1,6 +1,12 @@
 import { useMemo, useState } from 'react';
 import type { Chord, Quality, Tension } from '../types';
-import { getDegreeName, getDiatonicChords, getNoteNames, rootOffset } from '../lib/musicTheory';
+import {
+  getDegreeName,
+  getDiatonicChords,
+  getNoteNames,
+  isInKey,
+  rootOffset,
+} from '../lib/musicTheory';
 
 type Tab = 'diatonic' | 'quality' | 'tension';
 
@@ -10,6 +16,34 @@ const TENSION_CYCLE: Record<string, string[]> = {
   '11th': ['', '11', '#11'],
   '13th': ['', '13', 'b13'],
 };
+
+const SEVENTH_CYCLE = ['', '7', 'M7'];
+
+/** 各候補がルートから何半音上か */
+const OPTION_INTERVAL: Record<string, number> = {
+  '7': 10,
+  M7: 11,
+  '9': 14,
+  b9: 13,
+  '#9': 15,
+  '11': 17,
+  '#11': 18,
+  '13': 21,
+  b13: 20,
+};
+
+/**
+ * 巡回の順番をキーに合わせて並べ替える。
+ * 音階に収まる候補（ダイアトニック）を先に回す。たとえばキー C の I なら
+ * M7 が先で 7 が後、V なら 7 が先で M7 が後になる。
+ */
+function orderByKey(options: string[], root: string, key: string): string[] {
+  const candidates = options.filter((option) => option !== '');
+  const diatonic = candidates.filter((option) =>
+    isInKey(rootOffset(root) + OPTION_INTERVAL[option], key),
+  );
+  return ['', ...diatonic, ...candidates.filter((option) => !diatonic.includes(option))];
+}
 
 interface Props {
   selectedChord: Chord | null;
@@ -215,7 +249,7 @@ export default function ChordKeyboard({
   // --- テンション ---
 
   const cycleTension = (group: string) => {
-    const options = TENSION_CYCLE[group];
+    const options = orderByKey(TENSION_CYCLE[group], chord.root || normalizedKey, projectKey);
     const current = (chord.tensions || []).find((t) => options.includes(t)) || '';
     const next = options[(options.indexOf(current) + 1) % options.length];
 
@@ -229,7 +263,9 @@ export default function ChordKeyboard({
   };
 
   const cycleSeventh = () => {
-    const next = chord.seventh === '' ? '7' : chord.seventh === '7' ? 'M7' : '';
+    const options = orderByKey(SEVENTH_CYCLE, chord.root || normalizedKey, projectKey);
+    const current = chord.seventh === 'dim7' ? '' : chord.seventh;
+    const next = options[(options.indexOf(current) + 1) % options.length];
     onUpdateChord({ seventh: next as Chord['seventh'], isNC: false });
   };
 
