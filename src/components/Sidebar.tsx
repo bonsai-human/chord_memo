@@ -230,10 +230,10 @@ export default function Sidebar({
           </button>
           <label style={actionButton}>
             <Upload size={14} />
-            JSONを読み込み
+            ファイルを読み込み
             <input
               type="file"
-              accept=".json"
+              accept=".json,.txt,.cho,.pro,.chopro,.crd,.chordpro"
               style={{ display: 'none' }}
               onChange={(e) => {
                 const file = e.target.files?.[0];
