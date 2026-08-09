@@ -206,6 +206,117 @@ export function getChordName(chord: Chord | null | undefined): string {
   return name;
 }
 
+/** コード名の解析結果。id は呼び出し側で振る */
+export type ParsedChord = Omit<Chord, 'id'>;
+
+const EMPTY_PARSED: ParsedChord = {
+  root: 'C',
+  quality: '',
+  fifth: '',
+  seventh: '',
+  tensions: [],
+  onChord: '',
+  isDimMode: false,
+  isNC: false,
+  omits: [],
+};
+
+const TENSION_NAMES: Tension[] = ['9', 'b9', '#9', '11', '#11', '13', 'b13'];
+
+/**
+ * コード名を解析する。取り込み（rechord.cc / ChordPro）で使う。
+ * getChordName が出力する表記に加え、maj7 / min / °/ + のような
+ * よくある別表記も受ける。読めなければ null。
+ */
+export function parseChordName(raw: string): ParsedChord | null {
+  const text = raw.trim();
+  if (!text) return null;
+  if (/^n\.?\s*c\.?$/i.test(text)) return { ...EMPTY_PARSED, isNC: true };
+
+  // オンコード（末尾の /ベース音）を先に切り離す
+  const slash = text.match(/^(.*?)\/([A-G](?:#|b)?)$/);
+  const body = slash ? slash[1] : text;
+  const onChord = slash ? slash[2] : '';
+
+  const rootMatch = body.match(/^([A-G](?:#|b)?)/);
+  if (!rootMatch) return null;
+  const root = rootMatch[1];
+
+  let rest = body.slice(root.length);
+  const result: ParsedChord = { ...EMPTY_PARSED, root, onChord, tensions: [], omits: [] };
+
+  // 括弧の中身（テンション・omit・b5）を先に取り出す
+  rest = rest.replace(/\(\s*omit\s*3\s*\)/gi, () => {
+    result.omits.push('3rd');
+    return '';
+  });
+  rest = rest.replace(/\(\s*omit\s*5\s*\)/gi, () => {
+    result.omits.push('5th');
+    return '';
+  });
+  rest = rest.replace(/\(([^)]*)\)/g, (_, inner: string) => {
+    inner.split(',').forEach((token) => {
+      const value = token.trim();
+      if (value === 'b5') result.fifth = 'b5';
+      else if ((TENSION_NAMES as string[]).includes(value)) result.tensions.push(value as Tension);
+    });
+    return '';
+  });
+
+  // 三和音の種類
+  if (/^dim7/i.test(rest)) {
+    result.isDimMode = true;
+    result.quality = 'dim';
+    result.seventh = 'dim7';
+    rest = rest.slice(4);
+  } else if (/^(dim|°|o(?![a-z]))/i.test(rest)) {
+    result.isDimMode = true;
+    result.quality = 'dim';
+    rest = rest.replace(/^(dim|°|o)/i, '');
+  } else if (/^(aug|\+)/i.test(rest)) {
+    result.quality = 'aug';
+    rest = rest.replace(/^(aug|\+)/i, '');
+  } else if (/^(m(?!aj)|min|-)/.test(rest)) {
+    result.quality = 'm';
+    rest = rest.replace(/^(min|m|-)/, '');
+  }
+
+  // sus は 7th の前後どちらに書かれていても拾う
+  rest = rest.replace(/sus([24])?/i, (_, number: string | undefined) => {
+    if (result.quality === '' || result.quality === 'm') {
+      result.quality = number === '2' ? 'sus2' : 'sus4';
+    }
+    return '';
+  });
+
+  // 括弧なしの b5（m7b5 など）
+  rest = rest.replace(/b5/, () => {
+    result.fifth = 'b5';
+    return '';
+  });
+
+  if (/^(maj7|Maj7|M7|Δ)/.test(rest)) {
+    result.seventh = 'M7';
+    rest = rest.replace(/^(maj7|Maj7|M7|Δ)/, '');
+  } else if (/^7/.test(rest) && !result.seventh) {
+    result.seventh = '7';
+    rest = rest.slice(1);
+  }
+
+  // 6th は 7th を持たない 13th として表す（getChordName と同じ扱い）
+  rest = rest.replace(/^6/, () => {
+    if (!result.tensions.includes('13')) result.tensions.push('13');
+    return '';
+  });
+  rest = rest.replace(/add9/i, () => {
+    if (!result.tensions.includes('9')) result.tensions.push('9');
+    return '';
+  });
+
+  // 残りは解釈できなかった部分。ルートだけは活きるのでコードとしては返す
+  return result;
+}
+
 const DEGREE_NAMES = ['I', 'bII', 'II', 'bIII', 'III', 'IV', 'bV', 'V', 'bVI', 'VI', 'bVII', 'VII'];
 
 export function getDegreeName(chord: Chord | null | undefined, key: string): string {

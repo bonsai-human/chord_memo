@@ -33,6 +33,7 @@ import HelpModal from './components/HelpModal';
 import YouTubePlayer from './components/YouTubePlayer';
 import * as audioStore from './lib/audioStore';
 import { toChordPro, toRechord } from './lib/exporters';
+import { parseImport } from './lib/importers';
 
 const MOBILE_BREAKPOINT = 768;
 
@@ -519,7 +520,8 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const parsed = JSON.parse(e.target?.result as string);
+        const fallbackName = file.name.replace(/\.[^.]+$/, '');
+        const parsed = parseImport(e.target?.result as string, fallbackName);
         const imported = normalizeProject({
           ...parsed,
           id: storage.generateUUID(),
