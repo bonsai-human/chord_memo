@@ -11,9 +11,6 @@ const MIN_FONT = 0.5;
 const ROOT_FONT_PX = 16;
 /** スロット左右の内側余白 */
 const SLOT_PADDING = 4;
-/** これを超えるとスロットからはみ出して表示する */
-const EXPAND_MARGIN_DESKTOP = 100;
-const EXPAND_MARGIN_MOBILE = 50;
 
 let measureContext: CanvasRenderingContext2D | null | undefined;
 const widthCache = new Map<string, number>();
@@ -57,7 +54,6 @@ function fitChordName(
   isMobile: boolean,
 ): FontResult {
   const base = isMobile ? BASE_FONT_MOBILE : BASE_FONT_DESKTOP;
-  const margin = isMobile ? EXPAND_MARGIN_MOBILE : EXPAND_MARGIN_DESKTOP;
   const unitWidth = measureAtOneRem(name);
   if (unitWidth <= 0) return { fontSize: base, needsExpansion: false };
 
@@ -65,8 +61,9 @@ function fitChordName(
   const available = Math.max(0, displaySlots * slotWidth - SLOT_PADDING);
   const fontSize = Math.min(base, Math.max(MIN_FONT, available / unitWidth));
 
-  // 縮めても隣にかかるなら max-content ではみ出させる
-  const needsExpansion = unitWidth * fontSize > slotWidth - margin;
+  // 自分のスロットに収まるなら中央寄せのまま。収まらないときだけ
+  // max-content にして後続の空きスロットへはみ出させる
+  const needsExpansion = unitWidth * fontSize > slotWidth - SLOT_PADDING;
   return { fontSize, needsExpansion };
 }
 
