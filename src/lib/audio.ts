@@ -3,7 +3,14 @@ import type { Chord, InstrumentId, Project } from '../types';
 import { getIntervals, rootOffset } from './musicTheory';
 import { INSTRUMENTS, SAMPLE_BASE_URL } from './instruments';
 import * as youtube from './youtube';
-import { buildTimeline, timeOf, type ScheduledEvent, type Timeline } from './scheduler';
+import {
+  buildTimeline,
+  rangeBounds,
+  timeOf,
+  type ScheduledEvent,
+  type SlotPosition,
+  type Timeline,
+} from './scheduler';
 
 /** ベース音を置くオクターブ（MIDI） */
 const BASS_BASE = 36;
@@ -417,12 +424,20 @@ export interface PlayOptions {
   project: Project;
   /** 再生を始める位置（表示上の小節とスロット） */
   from?: { measureIndex: number; slotIndex: number };
+  /** ここが指定され、かつループが有効なら、この範囲だけを繰り返す */
+  loopRange?: { from: SlotPosition; to: SlotPosition };
   onSlot: (event: ScheduledEvent) => void;
   onEnd: () => void;
 }
 
 /** グリッド全体を再生する */
-export async function playGrid({ project, from, onSlot, onEnd }: PlayOptions): Promise<void> {
+export async function playGrid({
+  project,
+  from,
+  loopRange,
+  onSlot,
+  onEnd,
+}: PlayOptions): Promise<void> {
   stop();
   await Tone.start();
 
@@ -477,10 +492,13 @@ export async function playGrid({ project, from, onSlot, onEnd }: PlayOptions): P
     }, event.startTime);
   });
 
+  // 範囲を選んでいれば、その範囲だけを繰り返す
+  const bounds = loopRange ? rangeBounds(timeline, loopRange.from, loopRange.to) : null;
+
   if (project.loopEnabled) {
     transport.loop = true;
-    transport.loopStart = 0;
-    transport.loopEnd = timeline.totalDuration;
+    transport.loopStart = bounds ? bounds.start : 0;
+    transport.loopEnd = bounds ? bounds.end : timeline.totalDuration;
   } else {
     transport.loop = false;
     // stop() は transport.cancel() を呼ぶため、コールバックの外へ逃がす

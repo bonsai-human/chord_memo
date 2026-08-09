@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Download, Pencil, Plus, Trash2, Upload } from 'lucide-react';
+import { Copy, Download, Pencil, Plus, Trash2, Upload } from 'lucide-react';
 import type { Project } from '../types';
 
 interface Props {
@@ -11,6 +11,7 @@ interface Props {
   onSelect: (project: Project) => void;
   onCreate: () => void;
   onRename: (id: string, name: string) => void;
+  onDuplicate: (id: string) => void;
   onDelete: (id: string) => void;
   onExport: () => void;
   onImport: (file: File) => void;
@@ -40,6 +41,7 @@ export default function Sidebar({
   onSelect,
   onCreate,
   onRename,
+  onDuplicate,
   onDelete,
   onExport,
   onImport,
@@ -201,6 +203,22 @@ export default function Sidebar({
                   }}
                 >
                   <Pencil size={16} />
+                </button>
+                <button
+                  title="複製"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDuplicate(project.id);
+                  }}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--text-muted)',
+                    cursor: 'pointer',
+                    padding: 0,
+                  }}
+                >
+                  <Copy size={16} />
                 </button>
                 <button
                   title="削除"
