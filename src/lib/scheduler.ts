@@ -180,38 +180,28 @@ export function buildTimeline(project: Project, options: Options = {}): Timeline
       elapsed += beats * (60 / tempo);
     });
 
-    // メロディー。タイは直前の音を伸ばす
-    let melodyElapsed = measureStart;
-    let melodyPosition = measurePosition;
-    melodyOf(measure, timeSignature).forEach((slot, melodyIndex) => {
+    // メロディー。小節をまたぐ音はそのぶん長いだけで、特別扱いはしない
+    melodyOf(measure).forEach((note, melodyIndex) => {
       const delay = (p: number) => swingDelay(p, measureResolution, tempo, swing);
-      const startTime = melodyElapsed + delay(melodyPosition);
-      const beats = slot.duration || 1;
+      const startTime = measureStart + note.start * (60 / tempo) + delay(measurePosition + note.start);
+      const end = note.start + note.duration;
       const duration =
-        melodyElapsed + beats * (60 / tempo) + delay(melodyPosition + beats) - startTime;
+        measureStart + end * (60 / tempo) + delay(measurePosition + end) - startTime;
 
-      const previous = [...events].reverse().find((e) => e.type === 'melody');
-      if (slot.tie && previous && previous.pitch !== undefined) {
-        previous.duration += duration;
-      } else if (slot.pitch !== null) {
-        events.push({
-          type: 'melody',
-          startTime,
-          duration,
-          measureIndex: displayIndex,
-          slotIndex: melodyIndex,
-          sourceMeasureIndex: originalIndex,
-          chord: null,
-          key,
-          tempo,
-          pitch: slot.pitch,
-          melodyIndex,
-          loopInfo,
-        });
-      }
-
-      melodyPosition += beats;
-      melodyElapsed += beats * (60 / tempo);
+      events.push({
+        type: 'melody',
+        startTime,
+        duration,
+        measureIndex: displayIndex,
+        slotIndex: melodyIndex,
+        sourceMeasureIndex: originalIndex,
+        chord: null,
+        key,
+        tempo,
+        pitch: note.pitch,
+        melodyIndex,
+        loopInfo,
+      });
     });
 
     resolution = measureResolution;

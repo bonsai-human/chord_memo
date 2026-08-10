@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Chord, Measure, MelodySlot, Project, SlotRef } from './types';
+import type { Chord, Measure, Project, SlotRef } from './types';
 import * as storage from './lib/storage';
 import {
-  melodyOf,
+  beatLength,
+  measureSpans,
+  melodyNoteAt,
   normalizeProject,
+  removeMelodyNotes,
   resolveMeasureSettings,
   splitRhythm,
   writeMelodyNote,
@@ -55,6 +58,8 @@ export default function App() {
   const [noteValue, setNoteValue] = useState(1);
   const [dotted, setDotted] = useState(false);
   const [triplet, setTriplet] = useState(false);
+  /** メロディーのカーソル。マスの途中に立てるので拍で持つ */
+  const [melodyOffset, setMelodyOffset] = useState(0);
   const [useDegreeNotation, setUseDegreeNotation] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -64,6 +69,7 @@ export default function App() {
     measureIndex: number;
     slotIndex: number;
     melodyIndex?: number | null;
+    melodyOwnerIndex?: number | null;
     loopInfo?: { current: number; total: number };
   } | null>(null);
 
@@ -123,10 +129,13 @@ export default function App() {
     const measure = project?.measures[playingMeasureIndex];
     if (!container || !measure) return;
 
-    const prefix = editMode === 'melody' ? 'melody' : 'slot';
     const index = editMode === 'melody' ? playingMelodyIndex : playingSlotIndex;
     if (index === null || index === undefined) return;
-    const slot = document.getElementById(`${prefix}-${measure.id}-${index}`);
+    const id =
+      editMode === 'melody'
+        ? `melody-note-${measure.id}-${index}`
+        : `slot-${measure.id}-${index}`;
+    const slot = document.getElementById(id);
     if (!slot) return;
 
     const view = container.getBoundingClientRect();
@@ -284,13 +293,31 @@ export default function App() {
       setSelectedSlot({ measureId, slotIndex });
       setSelectionEnd(null);
 
-      // 置いてあるコードを鳴らして確認できるようにする
       const measure = project?.measures.find((m) => m.id === measureId);
+
+      // メロディー面ではマスの頭にカーソルを置き直す。
+      // 細かい位置はここからボタンで詰める
+      if (editMode === 'melody' && project && measure) {
+        const index = project.measures.indexOf(measure);
+        setMelodyOffset(slotIndex * beatLength(resolveSettings(index).timeSignature));
+        return;
+      }
+
+      // 置いてあるコードを鳴らして確認できるようにする
       const chordId = measure?.slots[slotIndex]?.chordId;
       const chord = chordId ? project?.chords[chordId] : null;
       if (chord && !isPlaying) void audio.playChord(chord, voicingOptions);
     },
-    [isRangeMode, selectedSlot, selectionEnd, project, isPlaying, voicingOptions],
+    [
+      isRangeMode,
+      selectedSlot,
+      selectionEnd,
+      project,
+      isPlaying,
+      voicingOptions,
+      editMode,
+      resolveSettings,
+    ],
   );
 
   // --- コード編集 ---
@@ -341,23 +368,20 @@ export default function App() {
     const range = resolveRange(project, selectedSlot, selectionEnd);
     if (!range) return;
 
-    // メロディー面では音を消す
+    // メロディー面では、選んだマスにかかる音を消す
     if (editMode === 'melody') {
+      const spans = measureSpans(project);
+      const fromBeat =
+        spans[range.from].start +
+        range.firstSlot * beatLength(resolveMeasureSettings(range.from, project).timeSignature);
+      const toBeat =
+        range.to === range.from && range.lastSlot === range.firstSlot
+          ? fromBeat + beatLength(resolveMeasureSettings(range.from, project).timeSignature)
+          : spans[range.to].start +
+            (range.lastSlot + 1) *
+              beatLength(resolveMeasureSettings(range.to, project).timeSignature);
       history.push(project, 'メロディー削除');
-      const measures = project.measures.map((m, index) => {
-        if (index < range.from || index > range.to) return m;
-        const timeSignature = resolveMeasureSettings(index, project).timeSignature;
-        const begin = index === range.from ? range.firstSlot : 0;
-        const melodySlots = melodyOf(m, timeSignature);
-        const end = index === range.to ? range.lastSlot : melodySlots.length - 1;
-        return {
-          ...m,
-          melody: melodySlots.map((slot, i) =>
-            i >= begin && i <= end ? { ...slot, pitch: null, tie: false } : slot,
-          ),
-        };
-      });
-      commit({ ...project, measures });
+      commit(removeMelodyNotes(project, fromBeat, toBeat));
       setSelectionEnd(null);
       setToast('メロディーを削除しました');
       return;
@@ -435,156 +459,179 @@ export default function App() {
     [resolveSettings, selectedMeasureIndex],
   );
 
-  const selectedMelodySlot = useMemo((): MelodySlot | null => {
-    if (!selectedMeasure || !selectedSlot) return null;
-    return melodyOf(selectedMeasure, selectedTimeSignature)[selectedSlot.slotIndex] ?? null;
-  }, [selectedMeasure, selectedSlot, selectedTimeSignature]);
-
-  /** 選択位置より前で最後に置かれた音。次の音をこの近くに置く */
-  const previousMelodyPitch = useMemo((): number | null => {
-    if (!project || !selectedSlot || selectedMeasureIndex < 0) return null;
-    for (let i = selectedMeasureIndex; i >= 0; i--) {
-      const measure = project.measures[i];
-      if (!measure.melody) continue;
-      const upTo = i === selectedMeasureIndex ? selectedSlot.slotIndex : measure.melody.length;
-      for (let s = Math.min(upTo, measure.melody.length) - 1; s >= 0; s--) {
-        const pitch = measure.melody[s].pitch;
-        if (pitch !== null) return pitch;
-      }
-    }
-    return null;
-  }, [project, selectedSlot, selectedMeasureIndex]);
-
   /** いま選んでいる音価（付点・3連を畳んだ長さ） */
   const melodyDuration = useMemo(
     () => noteValue * (dotted ? 1.5 : 1) * (triplet ? 2 / 3 : 1),
     [noteValue, dotted, triplet],
   );
 
-  /** 音を書き込む。楽譜と同じで、選んだ音価ぶん後ろを上書きする */
-  const putMelodyNote = useCallback(
-    (pitch: number | null, duration: number, tie = false, label = 'メロディー入力') => {
-      if (!project || !selectedSlot) return;
-      history.push(project, label);
-      commit(writeMelodyNote(project, selectedSlot.measureId, selectedSlot.slotIndex, {
-        pitch,
-        duration,
-        tie,
-      }));
-    },
-    [project, selectedSlot, history, commit],
+  /**
+   * メロディーのカーソル（小節頭からの拍）。マスの途中にも立てる。
+   * マスの外へ出た値は無視するので、グリッドをタップしたり面を切り替えたり
+   * すると自然にマスの頭へ戻る。
+   */
+  const melodyCursorStart = useMemo(() => {
+    if (!selectedSlot) return 0;
+    const beat = beatLength(selectedTimeSignature);
+    const cellStart = selectedSlot.slotIndex * beat;
+    return melodyOffset > cellStart && melodyOffset < cellStart + beat ? melodyOffset : cellStart;
+  }, [selectedSlot, selectedTimeSignature, melodyOffset]);
+
+  const melodyCursor = useMemo(
+    () => (selectedSlot ? { measureId: selectedSlot.measureId, start: melodyCursorStart } : null),
+    [selectedSlot, melodyCursorStart],
   );
 
-  /** 音高だけを差し替える（長さは変えない） */
-  const patchMelodySlot = useCallback(
-    (patch: Partial<MelodySlot>, label: string) => {
-      if (!project || !selectedSlot) return;
-      history.push(project, label);
-      const measures = project.measures.map((m, index) => {
-        if (m.id !== selectedSlot.measureId) return m;
-        const timeSignature = resolveMeasureSettings(index, project).timeSignature;
-        const melody = melodyOf(m, timeSignature).map((slot, i) =>
-          i === selectedSlot.slotIndex ? { ...slot, ...patch } : slot,
-        );
-        return { ...m, melody };
-      });
-      commit({ ...project, measures });
-    },
-    [project, selectedSlot, history, commit],
-  );
+  /** カーソルの上で鳴っている音 */
+  const selectedMelodyNote = useMemo(() => {
+    if (!selectedMeasure) return null;
+    return melodyNoteAt(selectedMeasure, melodyCursorStart)?.note ?? null;
+  }, [selectedMeasure, melodyCursorStart]);
 
-  /** 隣のマスへ動く。小節の端なら前後の小節へ渡る */
-  const moveMelodySelection = useCallback(
-    (delta: -1 | 1) => {
-      if (!project || !selectedSlot || selectedMeasureIndex < 0) return;
-      const measure = project.measures[selectedMeasureIndex];
-      const length = melodyOf(measure, selectedTimeSignature).length;
-      const next = selectedSlot.slotIndex + delta;
-      if (next >= 0 && next < length) {
-        setSelectedSlot({ measureId: measure.id, slotIndex: next });
-        return;
+  /** カーソルより前で最後に鳴り始めた音。次の音をこの近くに置く */
+  const previousMelodyPitch = useMemo((): number | null => {
+    if (!project || selectedMeasureIndex < 0) return null;
+    for (let i = selectedMeasureIndex; i >= 0; i--) {
+      const melody = project.measures[i]?.melody;
+      if (!melody) continue;
+      for (let n = melody.length - 1; n >= 0; n--) {
+        if (i < selectedMeasureIndex || melody[n].start < melodyCursorStart - 0.0001) {
+          return melody[n].pitch;
+        }
       }
-      const neighborIndex = selectedMeasureIndex + delta;
-      const neighbor = project.measures[neighborIndex];
-      if (!neighbor) return;
-      const neighborLength = melodyOf(
-        neighbor,
-        resolveSettings(neighborIndex).timeSignature,
-      ).length;
-      setSelectedSlot({
-        measureId: neighbor.id,
-        slotIndex: delta > 0 ? 0 : neighborLength - 1,
-      });
+    }
+    return null;
+  }, [project, selectedMeasureIndex, melodyCursorStart]);
+
+  /** カーソルを曲全体の時間軸で動かす。小節をまたぐときは隣の小節へ渡る */
+  const seekMelody = useCallback(
+    (deltaBeats: number) => {
+      if (!project || !selectedSlot || selectedMeasureIndex < 0) return;
+      const spans = measureSpans(project);
+      const span = spans[selectedMeasureIndex];
+      if (!span) return;
+      const total = spans[spans.length - 1].start + spans[spans.length - 1].length;
+      const abs = span.start + melodyCursorStart + deltaBeats;
+      if (abs < -0.0001 || abs > total - 0.0001) return;
+
+      let index = spans.findIndex((s) => abs < s.start + s.length - 0.0001);
+      if (index === -1) index = spans.length - 1;
+      const measure = project.measures[index];
+      if (!measure) return;
+      const start = abs - spans[index].start;
+      const beat = beatLength(resolveSettings(index).timeSignature);
+      setSelectedSlot({ measureId: measure.id, slotIndex: Math.floor(start / beat + 0.0001) });
+      setMelodyOffset(start);
     },
-    [project, selectedSlot, selectedMeasureIndex, selectedTimeSignature, resolveSettings],
+    [project, selectedSlot, selectedMeasureIndex, melodyCursorStart, resolveSettings],
   );
 
-  const advanceMelodySelection = useCallback(
-    () => moveMelodySelection(1),
-    [moveMelodySelection],
-  );
-
+  /** 音を書き込む。重なった音は消え、手前から伸びていた音は切られる */
   const inputMelody = useCallback(
-    (pitch: number | null) => {
-      putMelodyNote(pitch, melodyDuration);
-      if (pitch !== null && !isPlaying) void audio.playMelodyNote(pitch);
-      // ポチポチ打てるよう、入れたら次のマスへ進む
-      advanceMelodySelection();
+    (pitch: number) => {
+      if (!project || !selectedSlot) return;
+      history.push(project, 'メロディー入力');
+      commit(
+        writeMelodyNote(project, selectedSlot.measureId, melodyCursorStart, {
+          pitch,
+          duration: melodyDuration,
+        }),
+      );
+      if (!isPlaying) void audio.playMelodyNote(pitch);
+      // ポチポチ打てるよう、置いた音のぶんだけカーソルを進める
+      seekMelody(melodyDuration);
     },
-    [putMelodyNote, melodyDuration, advanceMelodySelection, isPlaying],
+    [
+      project,
+      selectedSlot,
+      melodyCursorStart,
+      melodyDuration,
+      history,
+      commit,
+      isPlaying,
+      seekMelody,
+    ],
   );
 
-  /** 音価を変える。音を選んでいればその長さも変える */
+  /** カーソルの音を消す。カーソルはその音の頭へ寄せる */
+  const deleteMelodyNote = useCallback(() => {
+    if (!project || !selectedMeasure || selectedMeasureIndex < 0) return;
+    const found = melodyNoteAt(selectedMeasure, melodyCursorStart);
+    if (!found) return;
+    const spans = measureSpans(project);
+    const abs = spans[selectedMeasureIndex].start + found.note.start;
+    history.push(project, 'メロディー削除');
+    commit(removeMelodyNotes(project, abs, abs + found.note.duration));
+    seekMelody(found.note.start - melodyCursorStart);
+  }, [
+    project,
+    selectedMeasure,
+    selectedMeasureIndex,
+    melodyCursorStart,
+    history,
+    commit,
+    seekMelody,
+  ]);
+
+  /** 音価を変える。カーソルに音があればその長さも変える */
   const changeMelodyValue = useCallback(
     (value: number, nextDotted = dotted, nextTriplet = triplet) => {
       setNoteValue(value);
       setDotted(nextDotted);
       setTriplet(nextTriplet);
-      if (!selectedMelodySlot) return;
+      if (!project || !selectedSlot || !selectedMelodyNote) return;
       const duration = value * (nextDotted ? 1.5 : 1) * (nextTriplet ? 2 / 3 : 1);
-      putMelodyNote(selectedMelodySlot.pitch, duration, selectedMelodySlot.tie, '音価変更');
+      history.push(project, '音価変更');
+      commit(
+        writeMelodyNote(project, selectedSlot.measureId, selectedMelodyNote.start, {
+          pitch: selectedMelodyNote.pitch,
+          duration,
+        }),
+      );
     },
-    [dotted, triplet, selectedMelodySlot, putMelodyNote],
+    [dotted, triplet, project, selectedSlot, selectedMelodyNote, history, commit],
   );
 
+  /** 音価の梯子を1段動かす。付点・3連は修飾なので保つ */
+  const stepMelodyValue = useCallback(
+    (delta: -1 | 1) => {
+      const index = NOTE_VALUES.findIndex((v) => Math.abs(v.value - noteValue) < 0.001);
+      const next = NOTE_VALUES[Math.min(NOTE_VALUES.length - 1, Math.max(0, index + delta))];
+      if (next && next.value !== noteValue) changeMelodyValue(next.value);
+    },
+    [noteValue, changeMelodyValue],
+  );
+
+  /** 選んでいる音を半音・オクターブ動かす */
   const shiftMelody = useCallback(
     (semitones: number) => {
-      if (!selectedMelodySlot || selectedMelodySlot.pitch === null) return;
-      const pitch = selectedMelodySlot.pitch + semitones;
-      patchMelodySlot({ pitch }, 'メロディー変更');
+      if (!project || !selectedSlot || !selectedMelodyNote) return;
+      const pitch = selectedMelodyNote.pitch + semitones;
+      history.push(project, 'メロディー変更');
+      commit(
+        writeMelodyNote(project, selectedSlot.measureId, selectedMelodyNote.start, {
+          pitch,
+          duration: selectedMelodyNote.duration,
+        }),
+      );
       if (!isPlaying) void audio.playMelodyNote(pitch);
     },
-    [selectedMelodySlot, patchMelodySlot, isPlaying],
+    [project, selectedSlot, selectedMelodyNote, history, commit, isPlaying],
   );
 
-  const toggleMelodyTie = useCallback(() => {
-    if (!selectedMelodySlot) return;
-    patchMelodySlot({ tie: !selectedMelodySlot.tie }, 'タイ');
-  }, [selectedMelodySlot, patchMelodySlot]);
-
-  // 既にある音を選んだときは、その音価をボタン側にも反映する
+  // 音の上にカーソルが来たら、その音価をボタン側にも反映する
   useEffect(() => {
-    if (editMode !== 'melody' || !selectedMelodySlot || selectedMelodySlot.pitch === null) return;
-    const duration = selectedMelodySlot.duration;
+    if (editMode !== 'melody' || !selectedMelodyNote) return;
+    const duration = selectedMelodyNote.duration;
     for (const { value } of NOTE_VALUES) {
-      if (Math.abs(duration - value) < 0.001) {
+      const apply = (nextDotted: boolean, nextTriplet: boolean) => {
         setNoteValue(value);
-        setDotted(false);
-        setTriplet(false);
-        return;
-      }
-      if (Math.abs(duration - value * 1.5) < 0.001) {
-        setNoteValue(value);
-        setDotted(true);
-        setTriplet(false);
-        return;
-      }
-      if (Math.abs(duration - (value * 2) / 3) < 0.001) {
-        setNoteValue(value);
-        setDotted(false);
-        setTriplet(true);
-        return;
-      }
+        setDotted(nextDotted);
+        setTriplet(nextTriplet);
+      };
+      if (Math.abs(duration - value) < 0.001) return apply(false, false);
+      if (Math.abs(duration - value * 1.5) < 0.001) return apply(true, false);
+      if (Math.abs(duration - (value * 2) / 3) < 0.001) return apply(false, true);
     }
     // 選択が変わったときだけ見る。入力のたびに走らせると音価が勝手に戻る
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -664,6 +711,7 @@ export default function App() {
             measureIndex: event.measureIndex,
             slotIndex: event.slotIndex,
             melodyIndex: current?.melodyIndex,
+            melodyOwnerIndex: current?.melodyOwnerIndex,
             loopInfo: event.loopInfo,
           })),
         onMelody: (event) =>
@@ -671,6 +719,7 @@ export default function App() {
             measureIndex: event.measureIndex,
             slotIndex: current?.slotIndex ?? 0,
             melodyIndex: event.melodyIndex ?? null,
+            melodyOwnerIndex: event.sourceMeasureIndex,
             loopInfo: event.loopInfo,
           })),
         onEnd: () => {
@@ -961,6 +1010,7 @@ export default function App() {
             useDegreeNotation={useDegreeNotation}
             resolveSettings={resolveSettings}
             onSelectSlot={handleSelectSlot}
+            melodyCursor={editMode === 'melody' ? melodyCursor : null}
             onSelectChunk={(measureId, anchor) => {
               // 行ヘッダのクリックでその小節を選び、小節設定メニューを開く
               setSelectedSlot({ measureId, slotIndex: 0 });
@@ -1032,7 +1082,7 @@ export default function App() {
 
           {editMode === 'melody' ? (
             <MelodyKeyboard
-              selected={selectedMelodySlot}
+              selected={selectedMelodyNote}
               previousPitch={previousMelodyPitch}
               projectKey={
                 selectedMeasureIndex >= 0 ? resolveSettings(selectedMeasureIndex).key : project.key
@@ -1042,9 +1092,10 @@ export default function App() {
               dotted={dotted}
               triplet={triplet}
               onChangeValue={changeMelodyValue}
-              onMoveCursor={moveMelodySelection}
+              onStepValue={stepMelodyValue}
+              onMoveCursor={(delta) => seekMelody(delta * melodyDuration)}
               onInput={inputMelody}
-              onTie={toggleMelodyTie}
+              onDelete={deleteMelodyNote}
               onShift={shiftMelody}
             />
           ) : (

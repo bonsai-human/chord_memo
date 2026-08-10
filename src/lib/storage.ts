@@ -1,4 +1,4 @@
-import type { Chord, InstrumentId, Measure, Project, Slot } from '../types';
+import type { Chord, InstrumentId, Measure, MelodyNote, Project, Slot } from '../types';
 
 const STORAGE_KEY = 'chord_memo_projects';
 const DEFAULT_SLOT_COUNT = 4;
@@ -12,6 +12,59 @@ const DEFAULT_MELODY_INSTRUMENT: InstrumentId = 'synth-lead';
  */
 export const MAX_MELODY_VOLUME = 30;
 const DEFAULT_MELODY_VOLUME = MAX_MELODY_VOLUME;
+
+/**
+ * メロディーを読む。
+ *
+ * 旧形式は「小節を埋めるスロットの列」で、休符は pitch: null、音を伸ばすときは
+ * タイで表していた。新形式は音そのものの列（start と duration を持ち、休符は
+ * 存在しない）なので、位置を積算しながら畳んで移す。タイは直前の音を伸ばす
+ * だけなので、その音の duration に足す。**タイは小節をまたぐ**（旧実装の再生も
+ * 直前のイベントを小節に関係なく伸ばしていた）ため、曲全体を通しで見る。
+ */
+function migrateMelody(rawMeasures: any[]): (MelodyNote[] | undefined)[] {
+  const result: (MelodyNote[] | undefined)[] = rawMeasures.map(() => undefined);
+  // 直前の音。タイで伸ばすときに小節をまたいで参照する
+  let previous: MelodyNote | null = null;
+
+  rawMeasures.forEach((m, index) => {
+    const raw = m?.melody;
+    if (!Array.isArray(raw) || raw.length === 0) return;
+
+    // 新形式はそのまま。start を持つかどうかで見分ける
+    if (typeof raw[0]?.start === 'number') {
+      const notes: MelodyNote[] = raw
+        .filter((n: any) => typeof n?.pitch === 'number' && n.duration > 0)
+        .map((n: any) => ({ start: n.start, duration: n.duration, pitch: n.pitch }))
+        .sort((a: MelodyNote, b: MelodyNote) => a.start - b.start);
+      if (notes.length > 0) {
+        result[index] = notes;
+        previous = notes[notes.length - 1];
+      }
+      return;
+    }
+
+    const notes: MelodyNote[] = [];
+    let position = 0;
+    for (const slot of raw) {
+      const duration = slot?.duration || 1;
+      if (slot?.tie && previous) {
+        previous.duration += duration;
+      } else if (typeof slot?.pitch === 'number') {
+        const note = { start: position, duration, pitch: slot.pitch };
+        notes.push(note);
+        previous = note;
+      } else {
+        // 休符は実体を持たない。ここで音の連なりが切れる
+        previous = null;
+      }
+      position += duration;
+    }
+    if (notes.length > 0) result[index] = notes;
+  });
+
+  return result;
+}
 
 export function generateUUID(): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
@@ -124,7 +177,8 @@ function migrate(raw: any): Project {
     });
   }
 
-  const measures: Measure[] = raw.measures.map((m: any) => ({
+  const melodies = migrateMelody(raw.measures);
+  const measures: Measure[] = raw.measures.map((m: any, index: number) => ({
     ...m,
     tempo: m.tempo || undefined,
     key: m.key || undefined,
@@ -132,13 +186,7 @@ function migrate(raw: any): Project {
     swing: m.swing,
     swingResolution: m.swingResolution || undefined,
     slots: m.slots.map((s: any) => ({ ...s, duration: s.duration || 1 })),
-    melody: Array.isArray(m.melody)
-      ? m.melody.map((s: any) => ({
-          pitch: typeof s.pitch === 'number' ? s.pitch : null,
-          duration: s.duration || 1,
-          tie: !!s.tie,
-        }))
-      : undefined,
+    melody: melodies[index],
   }));
 
   // 元実装は 'xylophone' を 'electric-piano' に変換していたが、その音色は定義に存在せず
