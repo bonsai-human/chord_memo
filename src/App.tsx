@@ -5,8 +5,8 @@ import {
   melodyOf,
   normalizeProject,
   resolveMeasureSettings,
-  splitMelodyRhythm,
   splitRhythm,
+  writeMelodyNote,
   transposeProject,
   updateMeasureSettings,
   type RhythmDivision,
@@ -25,7 +25,7 @@ import Sidebar from './components/Sidebar';
 import ChordGrid from './components/ChordGrid';
 import ActionBar, { type Anchor, type MenuKind } from './components/ActionBar';
 import ChordKeyboard from './components/ChordKeyboard';
-import MelodyKeyboard from './components/MelodyKeyboard';
+import MelodyKeyboard, { NOTE_VALUES } from './components/MelodyKeyboard';
 import PopupMenu, { type MenuItem } from './components/PopupMenu';
 import SettingModal, { type SettingType } from './components/SettingModal';
 import GeneralSettingsModal from './components/GeneralSettingsModal';
@@ -51,6 +51,10 @@ export default function App() {
   const [selectionEnd, setSelectionEnd] = useState<SlotRef | null>(null);
   const [isRangeMode, setIsRangeMode] = useState(false);
   const [editMode, setEditMode] = useState<'chord' | 'melody'>('chord');
+  /** メロディー入力で次に置く音価（4分音符 = 1）と修飾 */
+  const [noteValue, setNoteValue] = useState(1);
+  const [dotted, setDotted] = useState(false);
+  const [triplet, setTriplet] = useState(false);
   const [useDegreeNotation, setUseDegreeNotation] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -400,13 +404,13 @@ export default function App() {
         setToast('参照小節のリズムは変更できません');
         return;
       }
+      if (editMode === 'melody') {
+        setToast('メロディーの長さは音価のボタンで選びます');
+        return;
+      }
       history.push(project, 'リズム分割');
-      commit(
-        editMode === 'melody'
-          ? splitMelodyRhythm(project, selectedSlot.measureId, division)
-          : splitRhythm(project, selectedSlot.measureId, division),
-      );
-      setToast(editMode === 'melody' ? 'メロディーの刻みを変えました' : 'リズムを分割しました');
+      commit(splitRhythm(project, selectedSlot.measureId, division));
+      setToast('リズムを分割しました');
     },
     [project, selectedSlot, selectedMeasure, history, commit],
   );
@@ -451,6 +455,44 @@ export default function App() {
     return null;
   }, [project, selectedSlot, selectedMeasureIndex]);
 
+  /** いま選んでいる音価（付点・3連を畳んだ長さ） */
+  const melodyDuration = useMemo(
+    () => noteValue * (dotted ? 1.5 : 1) * (triplet ? 2 / 3 : 1),
+    [noteValue, dotted, triplet],
+  );
+
+  /** 音を書き込む。楽譜と同じで、選んだ音価ぶん後ろを上書きする */
+  const putMelodyNote = useCallback(
+    (pitch: number | null, duration: number, tie = false, label = 'メロディー入力') => {
+      if (!project || !selectedSlot) return;
+      history.push(project, label);
+      commit(writeMelodyNote(project, selectedSlot.measureId, selectedSlot.slotIndex, {
+        pitch,
+        duration,
+        tie,
+      }));
+    },
+    [project, selectedSlot, history, commit],
+  );
+
+  /** 音高だけを差し替える（長さは変えない） */
+  const patchMelodySlot = useCallback(
+    (patch: Partial<MelodySlot>, label: string) => {
+      if (!project || !selectedSlot) return;
+      history.push(project, label);
+      const measures = project.measures.map((m, index) => {
+        if (m.id !== selectedSlot.measureId) return m;
+        const timeSignature = resolveMeasureSettings(index, project).timeSignature;
+        const melody = melodyOf(m, timeSignature).map((slot, i) =>
+          i === selectedSlot.slotIndex ? { ...slot, ...patch } : slot,
+        );
+        return { ...m, melody };
+      });
+      commit({ ...project, measures });
+    },
+    [project, selectedSlot, history, commit],
+  );
+
   /** 次のマスへ進む。小節の終わりなら次の小節の頭へ */
   const advanceMelodySelection = useCallback(() => {
     if (!project || !selectedSlot || selectedMeasureIndex < 0) return;
@@ -464,46 +506,71 @@ export default function App() {
     if (next) setSelectedSlot({ measureId: next.id, slotIndex: 0 });
   }, [project, selectedSlot, selectedMeasureIndex, selectedTimeSignature]);
 
-  /** メロディーの1マスを書き換える */
-  const writeMelody = useCallback(
-    (slotIndex: number, patch: Partial<MelodySlot>, label: string) => {
-      if (!project || !selectedSlot) return;
-      history.push(project, label);
-      const measures = project.measures.map((m, index) => {
-        if (m.id !== selectedSlot.measureId) return m;
-        const timeSignature = resolveMeasureSettings(index, project).timeSignature;
-        const melody = melodyOf(m, timeSignature).map((slot, i) =>
-          i === slotIndex ? { ...slot, ...patch } : slot,
-        );
-        return { ...m, melody };
-      });
-      commit({ ...project, measures });
+  const inputMelody = useCallback(
+    (pitch: number | null) => {
+      putMelodyNote(pitch, melodyDuration);
+      if (pitch !== null && !isPlaying) void audio.playMelodyNote(pitch);
+      // ポチポチ打てるよう、入れたら次のマスへ進む
+      advanceMelodySelection();
     },
-    [project, selectedSlot, history, commit],
+    [putMelodyNote, melodyDuration, advanceMelodySelection, isPlaying],
   );
 
-  const inputMelody = useCallback(
-    (patch: MelodySlot) => {
-      if (!selectedSlot) return;
-      writeMelody(selectedSlot.slotIndex, { pitch: patch.pitch, tie: patch.tie }, 'メロディー入力');
-      if (patch.pitch !== null && !patch.tie && !isPlaying) {
-        void audio.playMelodyNote(patch.pitch);
-      }
-      // ポチポチ打てるよう、入れたら次のマスへ進む
-      if (!patch.tie) advanceMelodySelection();
+  /** 音価を変える。音を選んでいればその長さも変える */
+  const changeMelodyValue = useCallback(
+    (value: number, nextDotted = dotted, nextTriplet = triplet) => {
+      setNoteValue(value);
+      setDotted(nextDotted);
+      setTriplet(nextTriplet);
+      if (!selectedMelodySlot) return;
+      const duration = value * (nextDotted ? 1.5 : 1) * (nextTriplet ? 2 / 3 : 1);
+      putMelodyNote(selectedMelodySlot.pitch, duration, selectedMelodySlot.tie, '音価変更');
     },
-    [selectedSlot, writeMelody, advanceMelodySelection, isPlaying],
+    [dotted, triplet, selectedMelodySlot, putMelodyNote],
   );
 
   const shiftMelody = useCallback(
     (semitones: number) => {
-      if (!selectedSlot || !selectedMelodySlot || selectedMelodySlot.pitch === null) return;
+      if (!selectedMelodySlot || selectedMelodySlot.pitch === null) return;
       const pitch = selectedMelodySlot.pitch + semitones;
-      writeMelody(selectedSlot.slotIndex, { pitch }, 'メロディー変更');
+      patchMelodySlot({ pitch }, 'メロディー変更');
       if (!isPlaying) void audio.playMelodyNote(pitch);
     },
-    [selectedSlot, selectedMelodySlot, writeMelody, isPlaying],
+    [selectedMelodySlot, patchMelodySlot, isPlaying],
   );
+
+  const toggleMelodyTie = useCallback(() => {
+    if (!selectedMelodySlot) return;
+    patchMelodySlot({ tie: !selectedMelodySlot.tie }, 'タイ');
+  }, [selectedMelodySlot, patchMelodySlot]);
+
+  // 既にある音を選んだときは、その音価をボタン側にも反映する
+  useEffect(() => {
+    if (editMode !== 'melody' || !selectedMelodySlot || selectedMelodySlot.pitch === null) return;
+    const duration = selectedMelodySlot.duration;
+    for (const { value } of NOTE_VALUES) {
+      if (Math.abs(duration - value) < 0.001) {
+        setNoteValue(value);
+        setDotted(false);
+        setTriplet(false);
+        return;
+      }
+      if (Math.abs(duration - value * 1.5) < 0.001) {
+        setNoteValue(value);
+        setDotted(true);
+        setTriplet(false);
+        return;
+      }
+      if (Math.abs(duration - (value * 2) / 3) < 0.001) {
+        setNoteValue(value);
+        setDotted(false);
+        setTriplet(true);
+        return;
+      }
+    }
+    // 選択が変わったときだけ見る。入力のたびに走らせると音価が勝手に戻る
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editMode, selectedSlot?.measureId, selectedSlot?.slotIndex]);
 
   // --- コピー & ペースト ---
 
@@ -953,7 +1020,14 @@ export default function App() {
                 selectedMeasureIndex >= 0 ? resolveSettings(selectedMeasureIndex).key : project.key
               }
               isSlotSelected={!!selectedSlot}
+              noteValue={noteValue}
+              dotted={dotted}
+              triplet={triplet}
+              onChangeValue={(value) => changeMelodyValue(value)}
+              onToggleDotted={() => changeMelodyValue(noteValue, !dotted, false)}
+              onToggleTriplet={() => changeMelodyValue(noteValue, false, !triplet)}
               onInput={inputMelody}
+              onTie={toggleMelodyTie}
               onShift={shiftMelody}
             />
           ) : (

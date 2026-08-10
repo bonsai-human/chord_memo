@@ -56,10 +56,10 @@ interface Props {
 const gridStyle: React.CSSProperties = {
   display: 'grid',
   gridTemplateColumns: 'repeat(4, 1fr)',
-  gap: '8px',
+  gap: '6px',
 };
 
-const cellStyle: React.CSSProperties = { padding: '15px 4px', height: 'auto' };
+const cellStyle: React.CSSProperties = { padding: '9px 4px', height: 'auto' };
 
 export default function ChordKeyboard({
   selectedChord,
@@ -281,7 +281,7 @@ export default function ChordKeyboard({
           justifyContent: 'center',
           gap: '15px',
           background: 'var(--panel)',
-          padding: '10px',
+          padding: '6px 10px',
           borderBottom: '1px solid var(--border)',
           flexShrink: 0,
         }}
@@ -292,7 +292,7 @@ export default function ChordKeyboard({
           </button>
           <span
             style={{
-              fontSize: '1.5rem',
+              fontSize: '1.25rem',
               fontWeight: 'bold',
               color: 'var(--accent)',
               minWidth: '45px',
@@ -320,7 +320,7 @@ export default function ChordKeyboard({
           </button>
           <span
             style={{
-              fontSize: '1.5rem',
+              fontSize: '1.25rem',
               fontWeight: 'bold',
               color:
                 chord.onChord && chord.onChord !== chord.root ? '#f472b6' : 'var(--text-muted)',
@@ -359,7 +359,7 @@ export default function ChordKeyboard({
         ))}
       </div>
 
-      <div style={{ padding: '10px' }}>
+      <div style={{ padding: '8px 10px' }}>
         {tab === 'diatonic' && (
           <div style={gridStyle}>
             {diatonic.map((entry, i) => {
@@ -415,7 +415,7 @@ export default function ChordKeyboard({
         )}
 
         {tab === 'quality' && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
             <div style={gridStyle}>
               <button
                 className={`key-btn ${chord.quality === 'm' ? 'selected' : ''}`}

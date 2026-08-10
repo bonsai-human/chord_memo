@@ -291,44 +291,59 @@ export function melodyRange(project: Project): { low: number; high: number } | n
   return low === Infinity ? null : { low, high };
 }
 
-/** メロディーの刻みを変える。元の位置にあった音は引き継ぐ */
-export function splitMelodyRhythm(
+export interface MelodyInput {
+  pitch: number | null;
+  /** 音価（4分音符 = 1）。付点や3連もここに畳んで渡す */
+  duration: number;
+  tie?: boolean;
+}
+
+const MELODY_EPSILON = 0.0001;
+
+/**
+ * メロディーに音を書き込む。楽譜と同じで、選んだ音価のぶんだけ後ろを
+ * 上書きする。食われた音の残りは休符として残り、小節の長さは変わらない。
+ */
+export function writeMelodyNote(
   project: Project,
   measureId: string,
-  division: RhythmDivision,
+  index: number,
+  note: MelodyInput,
 ): Project {
-  const index = project.measures.findIndex((m) => m.id === measureId);
-  if (index === -1) return project;
+  const measureIndex = project.measures.findIndex((m) => m.id === measureId);
+  if (measureIndex === -1) return project;
 
   const measures = [...project.measures];
-  const target = measures[index];
-  const timeSignature = resolveMeasureSettings(index, project, measures).timeSignature;
-  const source = melodyOf(target, timeSignature);
+  const target = measures[measureIndex];
+  const timeSignature = resolveMeasureSettings(measureIndex, project, measures).timeSignature;
   const total = measureLength(timeSignature);
-  const unit = DIVISION_DURATION[division];
-  const count = Math.round(total / unit);
-  const epsilon = 0.001;
+  const current = melodyOf(target, timeSignature);
 
-  const melody: MelodySlot[] = [];
-  let position = 0;
-  for (let i = 0; i < count; i++) {
-    const duration = i === count - 1 ? Math.max(0.1, total - position) : unit;
+  const head = current.slice(0, index);
+  const start = head.reduce((sum, slot) => sum + slot.duration, 0);
+  // 小節をはみ出す音価は入る分だけに詰める
+  const duration = Math.min(note.duration, total - start);
+  if (duration <= MELODY_EPSILON) return project;
 
-    let picked: MelodySlot | null = null;
-    let cursor = 0;
-    for (const slot of source) {
-      if (cursor + slot.duration > position + epsilon && cursor <= position + epsilon) {
-        picked = slot;
-        break;
-      }
-      cursor += slot.duration;
+  const tail: MelodySlot[] = [];
+  let position = start;
+  for (const slot of current.slice(index)) {
+    const end = position + slot.duration;
+    if (end <= start + duration + MELODY_EPSILON) {
+      // まるごと上書きされる
+    } else if (position < start + duration - MELODY_EPSILON) {
+      // 一部だけ食われた音は、残りが休符になる
+      tail.push({ pitch: null, duration: end - (start + duration) });
+    } else {
+      tail.push(slot);
     }
-
-    melody.push({ pitch: picked?.pitch ?? null, duration, tie: picked?.tie });
-    position += duration;
+    position = end;
   }
 
-  measures[index] = { ...target, melody };
+  measures[measureIndex] = {
+    ...target,
+    melody: [...head, { pitch: note.pitch, duration, tie: note.tie }, ...tail],
+  };
   return normalizeProject({ ...project, measures });
 }
 
