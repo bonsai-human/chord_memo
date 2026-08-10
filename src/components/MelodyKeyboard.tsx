@@ -26,16 +26,6 @@ function beatsLabel(value: number, dotted: boolean, triplet: boolean): string {
   return `${Math.round(beats * 100) / 100}拍`;
 }
 
-/**
- * degree の音のうち anchor 以下で最も高いもの。
- * pitchForDegree は anchor に最も近い音を返すので、上に出ていたら
- * 1オクターブ下げれば「anchor 以下で最も高い」になる。
- */
-function degreePitchBelow(degree: number, key: string, anchor: number): number {
-  const nearest = pitchForDegree(degree, key, anchor);
-  return nearest <= anchor ? nearest : nearest - 12;
-}
-
 interface PaletteProps {
   /** 開いた基準になるボタンの位置 */
   rect: DOMRect;
@@ -332,74 +322,47 @@ export default function MelodyKeyboard({
       </div>
 
       {/*
-        3・4段目: 度数。上下段はつねに1オクターブ差で、ペアが anchor を挟む。
-        7個では ±1オクターブの候補を指しきれず、5度や6度の跳躍・同度の
-        オクターブ跳躍が押せなかったので2段にしている。
-        枠付きが「anchor に近い方」＝従来1段だったときに選ばれていた音。
+        3段目: 度数。押すと anchor に最も近い高さで入り、次のマスへ進む。
+        跳躍で意図と逆のオクターブに入ったときは ▼▲ で直す。
       */}
-      {[1, 0].map((octave) => (
-        <div
-          key={octave}
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(7, 1fr)',
-            gap: '6px',
-            padding: octave === 1 ? '8px 10px 3px' : '0 10px 8px',
-          }}
-        >
-          {[1, 2, 3, 4, 5, 6, 7].map((degree) => {
-            const below = degreePitchBelow(degree, projectKey, anchor);
-            const target = below + octave * 12;
-            const isCurrent = pitch === target;
-            // 近い方（同点なら下）が従来の挙動で選ばれていた音
-            const isNearest =
-              octave === 0
-                ? Math.abs(below - anchor) <= Math.abs(below + 12 - anchor)
-                : Math.abs(below + 12 - anchor) < Math.abs(below - anchor);
-            return (
-              <button
-                key={degree}
-                className={`key-btn ${isCurrent ? 'selected' : ''}`}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(7, 1fr)',
+          gap: '6px',
+          padding: '8px 10px',
+        }}
+      >
+        {[1, 2, 3, 4, 5, 6, 7].map((degree) => {
+          const target = pitchForDegree(degree, projectKey, anchor);
+          const isCurrent = pitch === target;
+          return (
+            <button
+              key={degree}
+              className={`key-btn ${isCurrent ? 'selected' : ''}`}
+              style={{
+                padding: '10px 2px',
+                display: 'flex',
+                alignItems: 'baseline',
+                justifyContent: 'center',
+                gap: '3px',
+              }}
+              onClick={() => onInput(target)}
+            >
+              <span style={{ fontSize: '1.05rem', fontWeight: 'bold' }}>{degree}</span>
+              {/* オクターブまで出しておくと、▼▲ が要るかを押す前に判断できる */}
+              <span
                 style={{
-                  padding: '8px 2px 10px',
-                  position: 'relative',
-                  display: 'flex',
-                  alignItems: 'baseline',
-                  justifyContent: 'center',
-                  gap: '3px',
+                  fontSize: '0.62rem',
+                  color: isCurrent ? 'var(--bg)' : 'var(--text-dim)',
                 }}
-                onClick={() => onInput(target)}
               >
-                <span style={{ fontSize: '1rem', fontWeight: 'bold' }}>{degree}</span>
-                <span
-                  style={{
-                    fontSize: '0.6rem',
-                    color: isCurrent ? 'var(--bg)' : 'var(--text-dim)',
-                  }}
-                >
-                  {getNoteName(target)}
-                </span>
-                {/* anchor に近い方＝順次進行で使う側の目印。14個から目で拾えるように */}
-                {isNearest && (
-                  <span
-                    style={{
-                      position: 'absolute',
-                      bottom: '4px',
-                      left: '50%',
-                      transform: 'translateX(-50%)',
-                      width: '40%',
-                      height: '2px',
-                      borderRadius: '1px',
-                      background: isCurrent ? 'var(--bg)' : 'var(--accent)',
-                      opacity: isCurrent ? 0.5 : 0.75,
-                    }}
-                  />
-                )}
-              </button>
-            );
-          })}
-        </div>
-      ))}
+                {getNoteName(target)}
+              </span>
+            </button>
+          );
+        })}
+      </div>
 
       {paletteRect && (
         <NoteValuePalette
