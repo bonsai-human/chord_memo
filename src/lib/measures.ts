@@ -492,22 +492,57 @@ export function removeMelodyNotes(project: Project, from: number, to: number): P
   });
 }
 
-/** 位置 start に鳴っている音。カーソル上の音を掴むのに使う */
-export function melodyNoteAt(
-  measure: Measure,
+/** カーソルが掴んでいる音。小節をまたぐ音もあるので曲全体から探す */
+export interface SelectedMelodyNote {
+  note: MelodyNote;
+  /** 音を持っている小節 */
+  measureId: string;
+  ownerIndex: number;
+  noteIndex: number;
+  /** 曲頭からの位置 */
+  abs: number;
+}
+
+/**
+ * カーソルの位置にある音を探す。
+ *
+ * カーソルを含む音を優先し、無ければ**カーソルちょうどで終わる音**を返す。
+ * 音を置くとカーソルはその音の終端へ進むので、後者があることで
+ * 「置いた直後にその音の長さを直す」ができる。
+ */
+export function melodyNoteAtCursor(
+  project: Project,
+  measureId: string,
   start: number,
-): { note: MelodyNote; index: number } | null {
-  const melody = melodyOf(measure);
-  for (let i = 0; i < melody.length; i++) {
-    const note = melody[i];
-    if (
-      start >= note.start - MELODY_EPSILON &&
-      start < note.start + note.duration - MELODY_EPSILON
-    ) {
-      return { note, index: i };
+  spans?: MeasureSpan[],
+): SelectedMelodyNote | null {
+  const measureIndex = project.measures.findIndex((m) => m.id === measureId);
+  if (measureIndex === -1) return null;
+  const list = spans ?? measureSpans(project);
+  const cursor = list[measureIndex].start + start;
+
+  let touching: SelectedMelodyNote | null = null;
+  for (let i = 0; i < project.measures.length; i++) {
+    const measure = project.measures[i];
+    if (!measure.melody) continue;
+    for (let n = 0; n < measure.melody.length; n++) {
+      const note = measure.melody[n];
+      const abs = list[i].start + note.start;
+      const found: SelectedMelodyNote = {
+        note,
+        measureId: measure.id,
+        ownerIndex: i,
+        noteIndex: n,
+        abs,
+      };
+      if (cursor >= abs - MELODY_EPSILON && cursor < abs + note.duration - MELODY_EPSILON) {
+        return found;
+      }
+      // 終端一致は、含む音が無かったときの控えとして覚えておく
+      if (Math.abs(abs + note.duration - cursor) < MELODY_EPSILON) touching = found;
     }
   }
-  return null;
+  return touching;
 }
 
 /** 1つの小節に描くメロディーの一片。小節をまたぐ音は複数の片に分かれる */

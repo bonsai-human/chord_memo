@@ -4,7 +4,7 @@ import * as storage from './lib/storage';
 import {
   beatLength,
   measureSpans,
-  melodyNoteAt,
+  melodyNoteAtCursor,
   normalizeProject,
   removeMelodyNotes,
   resolveMeasureSettings,
@@ -363,46 +363,6 @@ export default function App() {
     ],
   );
 
-  const deleteChordOnly = useCallback(() => {
-    if (!project || !selectedSlot) return;
-    const range = resolveRange(project, selectedSlot, selectionEnd);
-    if (!range) return;
-
-    // メロディー面では、選んだマスにかかる音を消す
-    if (editMode === 'melody') {
-      const spans = measureSpans(project);
-      const fromBeat =
-        spans[range.from].start +
-        range.firstSlot * beatLength(resolveMeasureSettings(range.from, project).timeSignature);
-      const toBeat =
-        range.to === range.from && range.lastSlot === range.firstSlot
-          ? fromBeat + beatLength(resolveMeasureSettings(range.from, project).timeSignature)
-          : spans[range.to].start +
-            (range.lastSlot + 1) *
-              beatLength(resolveMeasureSettings(range.to, project).timeSignature);
-      history.push(project, 'メロディー削除');
-      commit(removeMelodyNotes(project, fromBeat, toBeat));
-      setSelectionEnd(null);
-      setToast('メロディーを削除しました');
-      return;
-    }
-
-    history.push(project, 'コード削除');
-    const measures = project.measures.map((m, index) => {
-      if (index < range.from || index > range.to) return m;
-      const begin = index === range.from ? range.firstSlot : 0;
-      const end = index === range.to ? range.lastSlot : m.slots.length - 1;
-      return {
-        ...m,
-        slots: m.slots.map((s, i) => (i >= begin && i <= end ? { ...s, chordId: null } : s)),
-      };
-    });
-
-    commit({ ...project, measures });
-    setSelectionEnd(null);
-    setToast(selectionEnd ? '選択範囲のコードを削除しました' : 'コードを削除しました');
-  }, [project, selectedSlot, selectionEnd, history, commit, editMode]);
-
   const deleteMeasure = useCallback(() => {
     if (!project || !selectedSlot) return;
     const range = resolveRange(project, selectedSlot, selectionEnd);
@@ -482,11 +442,14 @@ export default function App() {
     [selectedSlot, melodyCursorStart],
   );
 
-  /** カーソルの上で鳴っている音 */
+  /**
+   * いま編集の対象になっている音。カーソルを含む音か、カーソルちょうどで
+   * 終わる音。後者があるので、置いた直後の音の長さをそのまま直せる
+   */
   const selectedMelodyNote = useMemo(() => {
-    if (!selectedMeasure) return null;
-    return melodyNoteAt(selectedMeasure, melodyCursorStart)?.note ?? null;
-  }, [selectedMeasure, melodyCursorStart]);
+    if (!project || !selectedSlot) return null;
+    return melodyNoteAtCursor(project, selectedSlot.measureId, melodyCursorStart);
+  }, [project, selectedSlot, melodyCursorStart]);
 
   /** カーソルより前で最後に鳴り始めた音。次の音をこの近くに置く */
   const previousMelodyPitch = useMemo((): number | null => {
@@ -503,15 +466,12 @@ export default function App() {
     return null;
   }, [project, selectedMeasureIndex, melodyCursorStart]);
 
-  /** カーソルを曲全体の時間軸で動かす。小節をまたぐときは隣の小節へ渡る */
-  const seekMelody = useCallback(
-    (deltaBeats: number) => {
-      if (!project || !selectedSlot || selectedMeasureIndex < 0) return;
+  /** カーソルを曲頭からの絶対位置へ置く。小節をまたぐときは隣の小節へ渡る */
+  const seekMelodyTo = useCallback(
+    (abs: number) => {
+      if (!project) return;
       const spans = measureSpans(project);
-      const span = spans[selectedMeasureIndex];
-      if (!span) return;
       const total = spans[spans.length - 1].start + spans[spans.length - 1].length;
-      const abs = span.start + melodyCursorStart + deltaBeats;
       if (abs < -0.0001 || abs > total - 0.0001) return;
 
       let index = spans.findIndex((s) => abs < s.start + s.length - 0.0001);
@@ -523,7 +483,21 @@ export default function App() {
       setSelectedSlot({ measureId: measure.id, slotIndex: Math.floor(start / beat + 0.0001) });
       setMelodyOffset(start);
     },
-    [project, selectedSlot, selectedMeasureIndex, melodyCursorStart, resolveSettings],
+    [project, resolveSettings],
+  );
+
+  /** カーソルの絶対位置 */
+  const melodyCursorAbs = useMemo(() => {
+    if (!project || selectedMeasureIndex < 0) return 0;
+    return measureSpans(project)[selectedMeasureIndex].start + melodyCursorStart;
+  }, [project, selectedMeasureIndex, melodyCursorStart]);
+
+  const seekMelody = useCallback(
+    (deltaBeats: number) => {
+      if (!selectedSlot) return;
+      seekMelodyTo(melodyCursorAbs + deltaBeats);
+    },
+    [selectedSlot, melodyCursorAbs, seekMelodyTo],
   );
 
   /** 音を書き込む。重なった音は消え、手前から伸びていた音は切られる */
@@ -553,43 +527,32 @@ export default function App() {
     ],
   );
 
-  /** カーソルの音を消す。カーソルはその音の頭へ寄せる */
-  const deleteMelodyNote = useCallback(() => {
-    if (!project || !selectedMeasure || selectedMeasureIndex < 0) return;
-    const found = melodyNoteAt(selectedMeasure, melodyCursorStart);
-    if (!found) return;
-    const spans = measureSpans(project);
-    const abs = spans[selectedMeasureIndex].start + found.note.start;
-    history.push(project, 'メロディー削除');
-    commit(removeMelodyNotes(project, abs, abs + found.note.duration));
-    seekMelody(found.note.start - melodyCursorStart);
-  }, [
-    project,
-    selectedMeasure,
-    selectedMeasureIndex,
-    melodyCursorStart,
-    history,
-    commit,
-    seekMelody,
-  ]);
-
   /** 音価を変える。カーソルに音があればその長さも変える */
   const changeMelodyValue = useCallback(
     (value: number, nextDotted = dotted, nextTriplet = triplet) => {
       setNoteValue(value);
       setDotted(nextDotted);
       setTriplet(nextTriplet);
-      if (!project || !selectedSlot || !selectedMelodyNote) return;
+      if (!project || !selectedMelodyNote) return;
+      const { note, measureId, abs } = selectedMelodyNote;
       const duration = value * (nextDotted ? 1.5 : 1) * (nextTriplet ? 2 / 3 : 1);
       history.push(project, '音価変更');
-      commit(
-        writeMelodyNote(project, selectedSlot.measureId, selectedMelodyNote.start, {
-          pitch: selectedMelodyNote.pitch,
-          duration,
-        }),
-      );
+      commit(writeMelodyNote(project, measureId, note.start, { pitch: note.pitch, duration }));
+      // 終端にカーソルを置いていたなら新しい終端へ。置く→直す→次を置く が続く
+      if (Math.abs(melodyCursorAbs - (abs + note.duration)) < 0.0001) {
+        seekMelodyTo(abs + duration);
+      }
     },
-    [dotted, triplet, project, selectedSlot, selectedMelodyNote, history, commit],
+    [
+      dotted,
+      triplet,
+      project,
+      selectedMelodyNote,
+      melodyCursorAbs,
+      history,
+      commit,
+      seekMelodyTo,
+    ],
   );
 
   /** 音価の梯子を1段動かす。付点・3連は修飾なので保つ */
@@ -605,24 +568,22 @@ export default function App() {
   /** 選んでいる音を半音・オクターブ動かす */
   const shiftMelody = useCallback(
     (semitones: number) => {
-      if (!project || !selectedSlot || !selectedMelodyNote) return;
-      const pitch = selectedMelodyNote.pitch + semitones;
+      if (!project || !selectedMelodyNote) return;
+      const { note, measureId } = selectedMelodyNote;
+      const pitch = note.pitch + semitones;
       history.push(project, 'メロディー変更');
       commit(
-        writeMelodyNote(project, selectedSlot.measureId, selectedMelodyNote.start, {
-          pitch,
-          duration: selectedMelodyNote.duration,
-        }),
+        writeMelodyNote(project, measureId, note.start, { pitch, duration: note.duration }),
       );
       if (!isPlaying) void audio.playMelodyNote(pitch);
     },
-    [project, selectedSlot, selectedMelodyNote, history, commit, isPlaying],
+    [project, selectedMelodyNote, history, commit, isPlaying],
   );
 
   // 音の上にカーソルが来たら、その音価をボタン側にも反映する
   useEffect(() => {
     if (editMode !== 'melody' || !selectedMelodyNote) return;
-    const duration = selectedMelodyNote.duration;
+    const duration = selectedMelodyNote.note.duration;
     for (const { value } of NOTE_VALUES) {
       const apply = (nextDotted: boolean, nextTriplet: boolean) => {
         setNoteValue(value);
@@ -636,6 +597,60 @@ export default function App() {
     // 選択が変わったときだけ見る。入力のたびに走らせると音価が勝手に戻る
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editMode, selectedSlot?.measureId, selectedSlot?.slotIndex]);
+
+  const deleteChordOnly = useCallback(() => {
+    if (!project || !selectedSlot) return;
+    const range = resolveRange(project, selectedSlot, selectionEnd);
+    if (!range) return;
+
+    // メロディー面。光っている音があればそれを、無ければマスを空にする
+    if (editMode === 'melody') {
+      const spans = measureSpans(project);
+      const cellBeat = (index: number) =>
+        beatLength(resolveMeasureSettings(index, project).timeSignature);
+
+      let from: number;
+      let to: number;
+      if (!selectionEnd && selectedMelodyNote) {
+        // 単独選択のときは、対象として光っている音そのものを消す
+        from = selectedMelodyNote.abs;
+        to = from + selectedMelodyNote.note.duration;
+      } else {
+        // 光っている音が無ければ、カーソルのいるマス（範囲ならその全体）を空にする
+        from = spans[range.from].start + range.firstSlot * cellBeat(range.from);
+        to = spans[range.to].start + (range.lastSlot + 1) * cellBeat(range.to);
+      }
+
+      history.push(project, 'メロディー削除');
+      commit(removeMelodyNotes(project, from, to));
+      setSelectionEnd(null);
+      setToast('メロディーを削除しました');
+      return;
+    }
+
+    history.push(project, 'コード削除');
+    const measures = project.measures.map((m, index) => {
+      if (index < range.from || index > range.to) return m;
+      const begin = index === range.from ? range.firstSlot : 0;
+      const end = index === range.to ? range.lastSlot : m.slots.length - 1;
+      return {
+        ...m,
+        slots: m.slots.map((s, i) => (i >= begin && i <= end ? { ...s, chordId: null } : s)),
+      };
+    });
+
+    commit({ ...project, measures });
+    setSelectionEnd(null);
+    setToast(selectionEnd ? '選択範囲のコードを削除しました' : 'コードを削除しました');
+  }, [
+    project,
+    selectedSlot,
+    selectionEnd,
+    history,
+    commit,
+    editMode,
+    selectedMelodyNote,
+  ]);
 
   // --- コピー & ペースト ---
 
@@ -918,7 +933,10 @@ export default function App() {
         ];
       case 'delete':
         return [
-          { label: 'コードのみ削除', onClick: deleteChordOnly },
+          {
+            label: editMode === 'melody' ? 'メロディーのみ削除' : 'コードのみ削除',
+            onClick: deleteChordOnly,
+          },
           { label: '小節ごと削除', color: 'var(--danger)', onClick: deleteMeasure },
         ];
       case 'settings': {
@@ -1011,6 +1029,14 @@ export default function App() {
             resolveSettings={resolveSettings}
             onSelectSlot={handleSelectSlot}
             melodyCursor={editMode === 'melody' ? melodyCursor : null}
+            selectedMelodyNote={
+              editMode === 'melody' && selectedMelodyNote
+                ? {
+                    ownerIndex: selectedMelodyNote.ownerIndex,
+                    noteIndex: selectedMelodyNote.noteIndex,
+                  }
+                : null
+            }
             onSelectChunk={(measureId, anchor) => {
               // 行ヘッダのクリックでその小節を選び、小節設定メニューを開く
               setSelectedSlot({ measureId, slotIndex: 0 });
@@ -1082,11 +1108,12 @@ export default function App() {
 
           {editMode === 'melody' ? (
             <MelodyKeyboard
-              selected={selectedMelodyNote}
+              selected={selectedMelodyNote?.note ?? null}
               previousPitch={previousMelodyPitch}
               projectKey={
                 selectedMeasureIndex >= 0 ? resolveSettings(selectedMeasureIndex).key : project.key
               }
+              useDegreeNotation={useDegreeNotation}
               isSlotSelected={!!selectedSlot}
               noteValue={noteValue}
               dotted={dotted}
@@ -1095,7 +1122,6 @@ export default function App() {
               onStepValue={stepMelodyValue}
               onMoveCursor={(delta) => seekMelody(delta * melodyDuration)}
               onInput={inputMelody}
-              onDelete={deleteMelodyNote}
               onShift={shiftMelody}
             />
           ) : (

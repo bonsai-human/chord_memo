@@ -114,6 +114,8 @@ interface Props {
   /** 直前に置いた音。次の音をこの近くに置く */
   previousPitch: number | null;
   projectKey: string;
+  /** キーに対する相対表記（移動ド）にするか。グリッドの表記と揃える */
+  useDegreeNotation: boolean;
   isSlotSelected: boolean;
   /** いま選んでいる音価と修飾 */
   noteValue: number;
@@ -125,28 +127,39 @@ interface Props {
   /** マスの移動。細かい位置はタップで狙わせずボタンで詰める */
   onMoveCursor: (delta: -1 | 1) => void;
   onInput: (pitch: number) => void;
-  /** カーソル上の音を消す */
-  onDelete: () => void;
   onShift: (semitones: number) => void;
 }
 
+/** タッチの当たり判定。44px はタッチターゲットの一般的な下限 */
+const TAP_SIZE = 44;
+
 const controlStyle: React.CSSProperties = {
-  padding: '6px 5px',
-  fontSize: '0.72rem',
-  minWidth: '34px',
+  height: `${TAP_SIZE}px`,
+  padding: '0 8px',
+  fontSize: '0.78rem',
+  minWidth: `${TAP_SIZE}px`,
 };
 
+/** ♭♯▼▲ や ◀▶ のような記号ボタン */
+const stepStyle: React.CSSProperties = {
+  width: `${TAP_SIZE}px`,
+  height: `${TAP_SIZE}px`,
+  fontSize: '1.05rem',
+};
+
+/** グループの区切り。左右の gap と合わせて 20px ぶん離す */
 const dividerStyle: React.CSSProperties = {
   width: '1px',
   alignSelf: 'stretch',
   background: 'var(--border)',
-  margin: '0 2px',
+  margin: '4px 0',
 };
 
 export default function MelodyKeyboard({
   selected,
   previousPitch,
   projectKey,
+  useDegreeNotation,
   isSlotSelected,
   noteValue,
   dotted,
@@ -155,7 +168,6 @@ export default function MelodyKeyboard({
   onStepValue,
   onMoveCursor,
   onInput,
-  onDelete,
   onShift,
 }: Props) {
   const [paletteRect, setPaletteRect] = useState<DOMRect | null>(null);
@@ -197,16 +209,26 @@ export default function MelodyKeyboard({
           flexWrap: 'wrap',
           alignItems: 'center',
           justifyContent: 'center',
-          gap: '4px',
+          gap: '12px',
           background: 'var(--panel)',
           padding: '8px',
           borderBottom: '1px solid var(--border)',
         }}
       >
-        <button className="step-btn" title="前のマスへ" onClick={() => onMoveCursor(-1)}>
+        <button
+          className="step-btn"
+          style={stepStyle}
+          title="前のマスへ"
+          onClick={() => onMoveCursor(-1)}
+        >
           ◀
         </button>
-        <button className="step-btn" title="次のマスへ" onClick={() => onMoveCursor(1)}>
+        <button
+          className="step-btn"
+          style={stepStyle}
+          title="次のマスへ"
+          onClick={() => onMoveCursor(1)}
+        >
           ▶
         </button>
 
@@ -216,14 +238,14 @@ export default function MelodyKeyboard({
           className="step-btn"
           title="音価を短くする"
           disabled={ladderIndex >= NOTE_VALUES.length - 1}
-          style={shiftStyle(ladderIndex < NOTE_VALUES.length - 1)}
+          style={{ ...stepStyle, ...shiftStyle(ladderIndex < NOTE_VALUES.length - 1) }}
           onClick={() => onStepValue(1)}
         >
           −
         </button>
         <button
           className="key-btn"
-          style={{ ...controlStyle, minWidth: '58px' }}
+          style={{ ...controlStyle, minWidth: '62px' }}
           title="タップで音価の一覧"
           onClick={(e) => setPaletteRect(e.currentTarget.getBoundingClientRect())}
         >
@@ -233,7 +255,7 @@ export default function MelodyKeyboard({
           className="step-btn"
           title="音価を長くする"
           disabled={ladderIndex <= 0}
-          style={shiftStyle(ladderIndex > 0)}
+          style={{ ...stepStyle, ...shiftStyle(ladderIndex > 0) }}
           onClick={() => onStepValue(-1)}
         >
           ＋
@@ -246,18 +268,6 @@ export default function MelodyKeyboard({
         >
           付点
         </button>
-
-        <span style={dividerStyle} />
-
-        <button
-          className="key-btn"
-          style={{ ...controlStyle, minWidth: '46px', color: selected ? 'var(--danger)' : undefined }}
-          disabled={!selected}
-          onClick={onDelete}
-          title="カーソルの音を消す"
-        >
-          削除
-        </button>
       </div>
 
       {/* 2段目: いま選んでいる音と、半音・オクターブの微調整 */}
@@ -266,15 +276,15 @@ export default function MelodyKeyboard({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          gap: '6px',
-          padding: '8px 10px 0',
+          gap: '12px',
+          padding: '10px 10px 0',
         }}
       >
         <button
           className="step-btn"
           title="1オクターブ下げる"
           disabled={!canShift}
-          style={shiftStyle(canShift)}
+          style={{ ...stepStyle, ...shiftStyle(canShift) }}
           onClick={() => onShift(-12)}
         >
           ▼
@@ -283,7 +293,7 @@ export default function MelodyKeyboard({
           className="step-btn"
           title="半音下げる"
           disabled={!canShift}
-          style={shiftStyle(canShift)}
+          style={{ ...stepStyle, ...shiftStyle(canShift) }}
           onClick={() => onShift(-1)}
         >
           ♭
@@ -295,15 +305,22 @@ export default function MelodyKeyboard({
             color: pitch === null ? 'var(--text-muted)' : '#f472b6',
             minWidth: '92px',
             textAlign: 'center',
+            // 半音ボタンと隣り合うので、誤タップしないよう左右を空ける
+            margin: '0 12px',
           }}
         >
-          {pitch === null ? '—' : `${getScaleDegree(pitch, projectKey)} ${getNoteName(pitch)}`}
+          {/* 度数はすぐ下の 1〜7 ボタンにも出ているので、ここは片方だけ */}
+          {pitch === null
+            ? '—'
+            : useDegreeNotation
+              ? getScaleDegree(pitch, projectKey)
+              : getNoteName(pitch, projectKey)}
         </span>
         <button
           className="step-btn"
           title="半音上げる"
           disabled={!canShift}
-          style={shiftStyle(canShift)}
+          style={{ ...stepStyle, ...shiftStyle(canShift) }}
           onClick={() => onShift(1)}
         >
           ♯
@@ -312,7 +329,7 @@ export default function MelodyKeyboard({
           className="step-btn"
           title="1オクターブ上げる"
           disabled={!canShift}
-          style={shiftStyle(canShift)}
+          style={{ ...stepStyle, ...shiftStyle(canShift) }}
           onClick={() => onShift(12)}
         >
           ▲

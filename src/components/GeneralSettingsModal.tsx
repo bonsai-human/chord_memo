@@ -115,7 +115,7 @@ export default function GeneralSettingsModal({
         />
         <ToggleCard
           label="度数表記"
-          description="I, IV, V... で表示"
+          description="コードは I, IV, V… / メロディーは移動ドで表示"
           checked={useDegreeNotation}
           onChange={onChangeDegreeNotation}
         />
