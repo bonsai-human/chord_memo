@@ -18,6 +18,7 @@ import {
 import {
   getChordName,
   getDegreeName,
+  getNoteName,
   getScaleDegree,
   getTheoreticalKeyDisplay,
 } from '../lib/musicTheory';
@@ -288,6 +289,25 @@ const MELODY_ROW_HEIGHT = 78;
 /** 音を表す帯の高さ */
 const NOTE_HEIGHT = 14;
 
+/** 音の帯に載せる文字。0.65rem 太字で描く前提 */
+const NOTE_LABEL_REM = 0.65;
+
+/**
+ * 帯に収まる範囲で音名を返す。
+ * 幅が足りなければオクターブ番号を落とし、それでも無理なら諦める。
+ * 音高は縦位置でも分かるので、無理に詰め込むより空ける方がよい。
+ */
+function fitNoteLabel(pitch: number, key: string, relative: boolean, width: number): string {
+  if (relative) {
+    const degree = getScaleDegree(pitch, key);
+    return measureAtOneRem(degree) * NOTE_LABEL_REM <= width ? degree : '';
+  }
+  const full = getNoteName(pitch, key);
+  if (measureAtOneRem(full) * NOTE_LABEL_REM <= width) return full;
+  const withoutOctave = full.replace(/-?[0-9]+$/, '');
+  return measureAtOneRem(withoutOctave) * NOTE_LABEL_REM <= width ? withoutOctave : '';
+}
+
 interface MelodyRowProps {
   /** この小節に描く音の片。小節をまたぐ音は前の小節から流れ込んでくる */
   segments: MelodySegment[];
@@ -295,15 +315,21 @@ interface MelodyRowProps {
   chordLabels: { name: string; duration: number }[];
   measureId: string;
   measureKey: string;
+  /** キーに対する相対表記（移動ド）にするか */
+  useDegreeNotation: boolean;
   /** マスの数と1マスの長さ。拍子どおりの等分 */
   cells: number;
   measureBeats: number;
+  /** 小節の実幅（px）。音名が帯に収まるかの判定に使う */
+  measureWidth: number;
   /** 曲中で使われている音高の範囲。縦位置の基準 */
   range: { low: number; high: number } | null;
   /** カーソルの位置（小節頭からの拍）。この小節にないときは null */
   cursor: number | null;
   /** 再生中に光らせる音。{ 小節 index, 音の index } で指す */
   playingNote: { ownerIndex: number; noteIndex: number } | null;
+  /** いま編集の対象になっている音。同じ指し方 */
+  selectedNote: { ownerIndex: number; noteIndex: number } | null;
   inSelection: (cellIndex: number) => boolean;
   onSelect: (cellIndex: number, shiftKey: boolean) => void;
 }
@@ -314,11 +340,14 @@ function MelodyRow({
   chordLabels,
   measureId,
   measureKey,
+  useDegreeNotation,
   cells,
   measureBeats,
+  measureWidth,
   range,
   cursor,
   playingNote,
+  selectedNote,
   inSelection,
   onSelect,
 }: MelodyRowProps) {
@@ -343,7 +372,8 @@ function MelodyRow({
           inset: 0,
           display: 'flex',
           pointerEvents: 'none',
-          zIndex: 0,
+          // マスより上に置く。下に敷くと選択したマスの塗りに隠れてしまう
+          zIndex: 2,
         }}
       >
         {chordLabels.map((label, index) => (
@@ -380,7 +410,8 @@ function MelodyRow({
             position: 'relative',
             cursor: 'pointer',
             borderLeft: index > 0 ? '1px solid var(--border)' : 'none',
-            background: inSelection(index) ? 'var(--in-range)' : 'transparent',
+            // 対象を示すのはカーソルと選択ノートなので、マスの塗りは控えめに
+            background: inSelection(index) ? 'rgba(99, 102, 241, 0.18)' : 'transparent',
             zIndex: 1,
           }}
         />
@@ -392,6 +423,10 @@ function MelodyRow({
         const isPlaying =
           playingNote?.ownerIndex === segment.ownerIndex &&
           playingNote?.noteIndex === segment.noteIndex;
+        const isSelected =
+          selectedNote?.ownerIndex === segment.ownerIndex &&
+          selectedNote?.noteIndex === segment.noteIndex;
+        const width = ((segment.to - segment.from) / measureBeats) * measureWidth - 4;
         return (
           <span
             key={`${segment.ownerIndex}-${segment.noteIndex}-${segment.from}`}
@@ -407,19 +442,24 @@ function MelodyRow({
                 segment.isEnd ? 3 : 0
               }px ${segment.isStart ? 3 : 0}px`,
               background: isPlaying ? '#f9a8d4' : '#f472b6',
+              // 選択中は白枠で囲む。どの音にアクションが効くかを一目で分かるように
+              outline: isSelected ? '2px solid #e2e8f0' : 'none',
               boxShadow: isPlaying ? '0 0 10px #f472b6' : 'none',
               color: 'var(--bg)',
-              fontSize: '0.65rem',
+              fontSize: `${NOTE_LABEL_REM}rem`,
               fontWeight: 'bold',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               overflow: 'hidden',
+              whiteSpace: 'nowrap',
               pointerEvents: 'none',
-              zIndex: 2,
+              zIndex: 3,
             }}
           >
-            {segment.isStart ? getScaleDegree(segment.pitch, measureKey) : ''}
+            {segment.isStart
+              ? fitNoteLabel(segment.pitch, measureKey, useDegreeNotation, width)
+              : ''}
           </span>
         );
       })}
@@ -476,6 +516,8 @@ interface Props {
   onSelectSlot: (measureId: string, slotIndex: number, shiftKey: boolean) => void;
   /** メロディーのカーソル位置（小節頭からの拍） */
   melodyCursor: { measureId: string; start: number } | null;
+  /** いま編集の対象になっているメロディーの音 */
+  selectedMelodyNote: { ownerIndex: number; noteIndex: number } | null;
   onSelectChunk: (measureId: string, anchor: { top: number; left: number }) => void;
   onToggleExpansion: (measureId: string) => void;
   isMobile: boolean;
@@ -492,6 +534,7 @@ export default function ChordGrid({
   resolveSettings,
   onSelectSlot,
   melodyCursor,
+  selectedMelodyNote,
   onSelectChunk,
   onToggleExpansion,
   isMobile,
@@ -661,8 +704,10 @@ export default function ChordGrid({
                           }))}
                           measureId={origin.id}
                           measureKey={settings.key}
+                          useDegreeNotation={useDegreeNotation}
                           cells={settings.timeSignature[0]}
                           measureBeats={measureLength(settings.timeSignature)}
+                          measureWidth={contentWidth / (isMobile ? 1 : 2)}
                           range={melodyBounds}
                           cursor={
                             melodyCursor?.measureId === origin.id ? melodyCursor.start : null
@@ -676,6 +721,7 @@ export default function ChordGrid({
                                 }
                               : null
                           }
+                          selectedNote={referenceSource ? null : selectedMelodyNote}
                           inSelection={(cellIndex) =>
                             isInSelection(
                               entry.measureIndex,
