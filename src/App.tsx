@@ -493,18 +493,36 @@ export default function App() {
     [project, selectedSlot, history, commit],
   );
 
-  /** 次のマスへ進む。小節の終わりなら次の小節の頭へ */
-  const advanceMelodySelection = useCallback(() => {
-    if (!project || !selectedSlot || selectedMeasureIndex < 0) return;
-    const measure = project.measures[selectedMeasureIndex];
-    const length = melodyOf(measure, selectedTimeSignature).length;
-    if (selectedSlot.slotIndex + 1 < length) {
-      setSelectedSlot({ measureId: measure.id, slotIndex: selectedSlot.slotIndex + 1 });
-      return;
-    }
-    const next = project.measures[selectedMeasureIndex + 1];
-    if (next) setSelectedSlot({ measureId: next.id, slotIndex: 0 });
-  }, [project, selectedSlot, selectedMeasureIndex, selectedTimeSignature]);
+  /** 隣のマスへ動く。小節の端なら前後の小節へ渡る */
+  const moveMelodySelection = useCallback(
+    (delta: -1 | 1) => {
+      if (!project || !selectedSlot || selectedMeasureIndex < 0) return;
+      const measure = project.measures[selectedMeasureIndex];
+      const length = melodyOf(measure, selectedTimeSignature).length;
+      const next = selectedSlot.slotIndex + delta;
+      if (next >= 0 && next < length) {
+        setSelectedSlot({ measureId: measure.id, slotIndex: next });
+        return;
+      }
+      const neighborIndex = selectedMeasureIndex + delta;
+      const neighbor = project.measures[neighborIndex];
+      if (!neighbor) return;
+      const neighborLength = melodyOf(
+        neighbor,
+        resolveSettings(neighborIndex).timeSignature,
+      ).length;
+      setSelectedSlot({
+        measureId: neighbor.id,
+        slotIndex: delta > 0 ? 0 : neighborLength - 1,
+      });
+    },
+    [project, selectedSlot, selectedMeasureIndex, selectedTimeSignature, resolveSettings],
+  );
+
+  const advanceMelodySelection = useCallback(
+    () => moveMelodySelection(1),
+    [moveMelodySelection],
+  );
 
   const inputMelody = useCallback(
     (pitch: number | null) => {
@@ -1023,9 +1041,8 @@ export default function App() {
               noteValue={noteValue}
               dotted={dotted}
               triplet={triplet}
-              onChangeValue={(value) => changeMelodyValue(value)}
-              onToggleDotted={() => changeMelodyValue(noteValue, !dotted, false)}
-              onToggleTriplet={() => changeMelodyValue(noteValue, false, !triplet)}
+              onChangeValue={changeMelodyValue}
+              onMoveCursor={moveMelodySelection}
               onInput={inputMelody}
               onTie={toggleMelodyTie}
               onShift={shiftMelody}
