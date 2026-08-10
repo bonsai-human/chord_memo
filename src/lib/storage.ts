@@ -6,7 +6,12 @@ const DEFAULT_SLOT_COUNT = 4;
 const DEFAULT_MASTER_VOLUME = 50;
 /** メロディーの既定。コードをピアノにしたときに埋もれない音色を選ぶ */
 const DEFAULT_MELODY_INSTRUMENT: InstrumentId = 'synth-lead';
-const DEFAULT_MELODY_VOLUME = 60;
+/**
+ * メロディーの音量上限。コードと重ねるとこれ以上は歪むので、
+ * スライダー自体をここで打ち止めにする
+ */
+export const MAX_MELODY_VOLUME = 30;
+const DEFAULT_MELODY_VOLUME = MAX_MELODY_VOLUME;
 
 export function generateUUID(): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
@@ -155,7 +160,8 @@ function migrate(raw: any): Project {
     // 以前は演奏音と同期音源が audioVolume を共用していた。演奏音は分離する
     masterVolume: raw.masterVolume ?? DEFAULT_MASTER_VOLUME,
     melodyInstrument: raw.melodyInstrument || DEFAULT_MELODY_INSTRUMENT,
-    melodyVolume: raw.melodyVolume ?? DEFAULT_MELODY_VOLUME,
+    // 上限を下げる前に保存された値が残っていることがあるので丸める
+    melodyVolume: Math.min(raw.melodyVolume ?? DEFAULT_MELODY_VOLUME, MAX_MELODY_VOLUME),
     audioUrl: raw.audioUrl || undefined,
     audioOffset: raw.audioOffset ?? 0,
     audioVolume: raw.audioVolume ?? 80,

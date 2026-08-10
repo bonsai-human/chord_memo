@@ -113,6 +113,20 @@ button {
   position: relative;
 }
 
+/*
+ * 小節の切れ目。拍の区切り (スロットの border-left) は 1px なので、
+ * 小節線はそれより太く明るくして区別できるようにする。
+ * 2 列レイアウトでは左の列 = 奇数番目の子が小節線を持つ。
+ */
+.chord-grid-chunk .measure-box:nth-child(odd) {
+  border-right: 2px solid var(--border-light);
+}
+
+/* 1 列表示では右端がチャンクの枠線と重なるので出さない */
+.chord-grid-chunk.mobile .measure-box:nth-child(odd) {
+  border-right: none;
+}
+
 .long-press-active {
   user-select: none;
 }
