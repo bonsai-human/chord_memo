@@ -278,7 +278,7 @@ function SlotView({
 }
 
 /** メロディー面での小節の高さ。音高を縦位置で見せるため広くとる */
-const MELODY_ROW_HEIGHT = 96;
+const MELODY_ROW_HEIGHT = 78;
 
 interface MelodyRowProps {
   melody: MelodySlot[];
