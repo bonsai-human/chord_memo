@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { getNoteName, getScaleDegree, pitchForDegree, rootOffset } from '../lib/musicTheory';
-import type { MelodySlot } from '../types';
+import type { MelodyNote } from '../types';
 
 /** 音価の候補（4分音符 = 1）。長い順に並べる＝ステッパーの梯子でもある */
 export const NOTE_VALUES: { label: string; value: number }[] = [
@@ -109,7 +109,8 @@ function NoteValuePalette({ rect, value, dotted, triplet, onPick, onClose }: Pal
 }
 
 interface Props {
-  selected: MelodySlot | null;
+  /** カーソル上の音。無ければ null（＝そこは無音） */
+  selected: MelodyNote | null;
   /** 直前に置いた音。次の音をこの近くに置く */
   previousPitch: number | null;
   projectKey: string;
@@ -119,10 +120,13 @@ interface Props {
   dotted: boolean;
   triplet: boolean;
   onChangeValue: (value: number, dotted: boolean, triplet: boolean) => void;
+  /** 音価の梯子を1段動かす。連打を取りこぼさないよう計算は呼び出し側に置く */
+  onStepValue: (delta: -1 | 1) => void;
   /** マスの移動。細かい位置はタップで狙わせずボタンで詰める */
   onMoveCursor: (delta: -1 | 1) => void;
-  onInput: (pitch: number | null) => void;
-  onTie: () => void;
+  onInput: (pitch: number) => void;
+  /** カーソル上の音を消す */
+  onDelete: () => void;
   onShift: (semitones: number) => void;
 }
 
@@ -148,9 +152,10 @@ export default function MelodyKeyboard({
   dotted,
   triplet,
   onChangeValue,
+  onStepValue,
   onMoveCursor,
   onInput,
-  onTie,
+  onDelete,
   onShift,
 }: Props) {
   const [paletteRect, setPaletteRect] = useState<DOMRect | null>(null);
@@ -178,11 +183,6 @@ export default function MelodyKeyboard({
   const anchor = pitch ?? previousPitch ?? rootOffset(projectKey) + REFERENCE_PITCH;
 
   const ladderIndex = NOTE_VALUES.findIndex((v) => Math.abs(v.value - noteValue) < 0.001);
-  /** 梯子を1段動かす。付点・3連は「モード」なので保ったまま */
-  const stepValue = (delta: -1 | 1) => {
-    const next = NOTE_VALUES[Math.min(NOTE_VALUES.length - 1, Math.max(0, ladderIndex + delta))];
-    if (next) onChangeValue(next.value, dotted, triplet);
-  };
 
   const canShift = pitch !== null;
   const shiftStyle = (enabled: boolean): React.CSSProperties =>
@@ -217,7 +217,7 @@ export default function MelodyKeyboard({
           title="音価を短くする"
           disabled={ladderIndex >= NOTE_VALUES.length - 1}
           style={shiftStyle(ladderIndex < NOTE_VALUES.length - 1)}
-          onClick={() => stepValue(1)}
+          onClick={() => onStepValue(1)}
         >
           −
         </button>
@@ -234,7 +234,7 @@ export default function MelodyKeyboard({
           title="音価を長くする"
           disabled={ladderIndex <= 0}
           style={shiftStyle(ladderIndex > 0)}
-          onClick={() => stepValue(-1)}
+          onClick={() => onStepValue(-1)}
         >
           ＋
         </button>
@@ -249,16 +249,14 @@ export default function MelodyKeyboard({
 
         <span style={dividerStyle} />
 
-        <button className="key-btn" style={controlStyle} onClick={() => onInput(null)}>
-          休符
-        </button>
         <button
-          className={`key-btn ${selected?.tie ? 'selected' : ''}`}
-          style={controlStyle}
-          onClick={onTie}
-          title="直前の音を伸ばす"
+          className="key-btn"
+          style={{ ...controlStyle, minWidth: '46px', color: selected ? 'var(--danger)' : undefined }}
+          disabled={!selected}
+          onClick={onDelete}
+          title="カーソルの音を消す"
         >
-          タイ
+          削除
         </button>
       </div>
 
@@ -299,7 +297,7 @@ export default function MelodyKeyboard({
             textAlign: 'center',
           }}
         >
-          {pitch === null ? '休符' : `${getScaleDegree(pitch, projectKey)} ${getNoteName(pitch)}`}
+          {pitch === null ? '—' : `${getScaleDegree(pitch, projectKey)} ${getNoteName(pitch)}`}
         </span>
         <button
           className="step-btn"

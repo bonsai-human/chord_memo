@@ -1,4 +1,4 @@
-import type { Chord, EffectiveSettings, Measure, MelodySlot, Project } from '../types';
+import type { Chord, EffectiveSettings, Measure, MelodyNote, Project } from '../types';
 import {
   getPitchClassName,
   getTranspositionOffset,
@@ -17,7 +17,12 @@ const TRAILING_EMPTY_MEASURES = 3;
 const nearestShift = (semitones: number) => (semitones > 6 ? semitones - 12 : semitones);
 
 function hasContent(m: Measure): boolean {
-  return m.slots.some((s) => s.chordId !== null) || !!m.label || !!m.referenceLabel;
+  return (
+    m.slots.some((s) => s.chordId !== null) ||
+    (m.melody?.length ?? 0) > 0 ||
+    !!m.label ||
+    !!m.referenceLabel
+  );
 }
 
 export function lastContentIndex(measures: Measure[]): number {
@@ -93,7 +98,11 @@ export function normalizeProject(project: Project): Project {
     if (!m.referenceLabel) m.isReferenceExpanded = false;
   });
 
-  return cleanupOrphanedChords({ ...project, measures });
+  // 拍子が変わると小節の長さが変わるので、はみ出した音をここで整える
+  return cleanupOrphanedChords({
+    ...project,
+    measures: sanitizeMelody(project, measures),
+  });
 }
 
 /**
@@ -183,9 +192,7 @@ export function updateMeasureSettings(
         });
         // メロディーも同じだけ動かす（音域を保つため近い向きで）
         const melodyShift = nearestShift(semitones);
-        const nextMelody = m.melody?.map((slot) =>
-          slot.pitch === null ? slot : { ...slot, pitch: slot.pitch + melodyShift },
-        );
+        const nextMelody = m.melody?.map((note) => ({ ...note, pitch: note.pitch + melodyShift }));
         measures[i] = { ...m, slots: nextSlots, melody: nextMelody };
       }
     }
@@ -259,22 +266,21 @@ export function transposeProject(project: Project, semitones: number): Project {
       }
       return { ...slot, chordId: remapped[cacheKey] };
     });
-    const melody = measure.melody?.map((slot) =>
-      slot.pitch === null ? slot : { ...slot, pitch: slot.pitch + nearestShift(shift) },
-    );
+    const melody = measure.melody?.map((note) => ({
+      ...note,
+      pitch: note.pitch + nearestShift(shift),
+    }));
     return { ...measure, slots, melody };
   });
 
   return normalizeProject({ ...shifted, measures, chords });
 }
 
-/** その小節のメロディー。未設定なら拍数ぶんの休符を返す */
-export function melodyOf(measure: Measure, timeSignature: [number, number]): MelodySlot[] {
-  if (measure.melody && measure.melody.length > 0) return measure.melody;
-  return Array.from({ length: timeSignature[0] }, () => ({
-    pitch: null,
-    duration: 4 / timeSignature[1],
-  }));
+const MELODY_EPSILON = 0.0001;
+
+/** その小節のメロディー。start 昇順で返る */
+export function melodyOf(measure: Measure): MelodyNote[] {
+  return measure.melody ?? [];
 }
 
 /** 曲中で使われている音高の範囲。メロディーの縦位置を決めるのに使う */
@@ -282,69 +288,277 @@ export function melodyRange(project: Project): { low: number; high: number } | n
   let low = Infinity;
   let high = -Infinity;
   project.measures.forEach((measure) => {
-    measure.melody?.forEach((slot) => {
-      if (slot.pitch === null) return;
-      if (slot.pitch < low) low = slot.pitch;
-      if (slot.pitch > high) high = slot.pitch;
+    measure.melody?.forEach((note) => {
+      if (note.pitch < low) low = note.pitch;
+      if (note.pitch > high) high = note.pitch;
     });
   });
   return low === Infinity ? null : { low, high };
 }
 
-export interface MelodyInput {
-  pitch: number | null;
-  /** 音価（4分音符 = 1）。付点や3連もここに畳んで渡す */
-  duration: number;
-  tie?: boolean;
+/** 小節の曲頭からの位置と長さ（4分音符 = 1） */
+export interface MeasureSpan {
+  start: number;
+  length: number;
 }
 
-const MELODY_EPSILON = 0.0001;
+export function measureSpans(project: Project, measures?: Measure[]): MeasureSpan[] {
+  const list = measures ?? project.measures;
+  const spans: MeasureSpan[] = [];
+  let position = 0;
+  list.forEach((_, index) => {
+    const length = measureLength(resolveMeasureSettings(index, project, list).timeSignature);
+    spans.push({ start: position, length });
+    position += length;
+  });
+  return spans;
+}
+
+/** 曲頭からの絶対位置に並べたメロディー */
+interface AbsoluteNote {
+  abs: number;
+  duration: number;
+  pitch: number;
+}
+
+function flattenMelody(measures: Measure[], spans: MeasureSpan[]): AbsoluteNote[] {
+  const notes: AbsoluteNote[] = [];
+  measures.forEach((measure, index) => {
+    const span = spans[index];
+    if (!span) return;
+    measure.melody?.forEach((note) => {
+      notes.push({ abs: span.start + note.start, duration: note.duration, pitch: note.pitch });
+    });
+  });
+  return notes.sort((a, b) => a.abs - b.abs);
+}
 
 /**
- * メロディーに音を書き込む。楽譜と同じで、選んだ音価のぶんだけ後ろを
- * 上書きする。食われた音の残りは休符として残り、小節の長さは変わらない。
+ * 絶対位置の音列を小節へ配り直す。音は「始まりのある小節」が持ち、
+ * 小節をまたぐぶんは duration に残る。重なりは後ろの音を優先して詰める。
+ */
+function unflattenMelody(
+  measures: Measure[],
+  spans: MeasureSpan[],
+  notes: AbsoluteNote[],
+): Measure[] {
+  const buckets: MelodyNote[][] = measures.map(() => []);
+  const sorted = [...notes].sort((a, b) => a.abs - b.abs);
+  const total = spans.length ? spans[spans.length - 1].start + spans[spans.length - 1].length : 0;
+
+  sorted.forEach((note, i) => {
+    // 次の音に食い込まないよう、また曲の終わりを超えないように詰める
+    const limit = Math.min(sorted[i + 1]?.abs ?? total, total);
+    const duration = Math.min(note.duration, limit - note.abs);
+    if (duration <= MELODY_EPSILON) return;
+
+    let index = spans.findIndex(
+      (span) => note.abs < span.start + span.length - MELODY_EPSILON,
+    );
+    if (index === -1) index = spans.length - 1;
+    if (index < 0) return;
+    buckets[index].push({
+      start: Math.max(0, note.abs - spans[index].start),
+      duration,
+      pitch: note.pitch,
+    });
+  });
+
+  return measures.map((measure, index) => {
+    const melody = buckets[index];
+    if (melody.length === 0) {
+      return measure.melody === undefined ? measure : { ...measure, melody: undefined };
+    }
+    return { ...measure, melody };
+  });
+}
+
+/**
+ * メロディーを整える。拍子が変わると小節の長さが変わるので、
+ * 入りきらなくなった音を落とし、重なりを詰める。
+ *
+ * コードのスロットが小節に留まるのに合わせて、音も小節に留める
+ * （絶対時間で置き直すと小節線に対してずれてしまう）。
+ */
+function sanitizeMelody(project: Project, measures: Measure[]): Measure[] {
+  if (!measures.some((m) => m.melody && m.melody.length > 0)) return measures;
+  const spans = measureSpans(project, measures);
+
+  const cleaned = measures.map((measure, index) => {
+    if (!measure.melody || measure.melody.length === 0) {
+      return measure.melody === undefined ? measure : { ...measure, melody: undefined };
+    }
+    const length = spans[index]?.length ?? 0;
+    const notes = measure.melody
+      .filter(
+        (note) =>
+          note.start > -MELODY_EPSILON &&
+          note.start < length - MELODY_EPSILON &&
+          note.duration > MELODY_EPSILON,
+      )
+      .map((note) => ({ ...note, start: Math.max(0, note.start) }))
+      .sort((a, b) => a.start - b.start);
+
+    // 同じ小節の中の重なりは後ろの音を優先して詰める
+    for (let i = 0; i < notes.length - 1; i++) {
+      notes[i].duration = Math.min(notes[i].duration, notes[i + 1].start - notes[i].start);
+    }
+    if (notes.length === 0) {
+      return measure.melody === undefined ? measure : { ...measure, melody: undefined };
+    }
+    return { ...measure, melody: notes };
+  });
+
+  // 小節をまたぐ音が次の音や曲の終わりに食い込まないように切る
+  const total = spans.length ? spans[spans.length - 1].start + spans[spans.length - 1].length : 0;
+  cleaned.forEach((measure, index) => {
+    const notes = measure.melody;
+    if (!notes || notes.length === 0) return;
+    const last = notes[notes.length - 1];
+    const abs = spans[index].start + last.start;
+    let limit = total;
+    for (let i = index + 1; i < cleaned.length; i++) {
+      const next = cleaned[i].melody?.[0];
+      if (next) {
+        limit = spans[i].start + next.start;
+        break;
+      }
+    }
+    last.duration = Math.min(last.duration, limit - abs);
+  });
+
+  return cleaned;
+}
+
+export interface MelodyInput {
+  pitch: number;
+  /** 音価（4分音符 = 1）。付点や3連もここに畳んで渡す */
+  duration: number;
+}
+
+/**
+ * メロディーに音を書き込む。重なった音は消し、途中まで鳴っていた音は
+ * 新しい音の手前で切る。小節をまたぐ長さでもそのまま入る。
  */
 export function writeMelodyNote(
   project: Project,
   measureId: string,
-  index: number,
+  start: number,
   note: MelodyInput,
 ): Project {
   const measureIndex = project.measures.findIndex((m) => m.id === measureId);
   if (measureIndex === -1) return project;
 
   const measures = [...project.measures];
-  const target = measures[measureIndex];
-  const timeSignature = resolveMeasureSettings(measureIndex, project, measures).timeSignature;
-  const total = measureLength(timeSignature);
-  const current = melodyOf(target, timeSignature);
-
-  const head = current.slice(0, index);
-  const start = head.reduce((sum, slot) => sum + slot.duration, 0);
-  // 小節をはみ出す音価は入る分だけに詰める
-  const duration = Math.min(note.duration, total - start);
+  const spans = measureSpans(project, measures);
+  const abs = spans[measureIndex].start + start;
+  const total = spans[spans.length - 1].start + spans[spans.length - 1].length;
+  const duration = Math.min(note.duration, total - abs);
   if (duration <= MELODY_EPSILON) return project;
 
-  const tail: MelodySlot[] = [];
-  let position = start;
-  for (const slot of current.slice(index)) {
-    const end = position + slot.duration;
-    if (end <= start + duration + MELODY_EPSILON) {
-      // まるごと上書きされる
-    } else if (position < start + duration - MELODY_EPSILON) {
-      // 一部だけ食われた音は、残りが休符になる
-      tail.push({ pitch: null, duration: end - (start + duration) });
-    } else {
-      tail.push(slot);
+  const kept: AbsoluteNote[] = [];
+  flattenMelody(measures, spans).forEach((existing) => {
+    const end = existing.abs + existing.duration;
+    // 新しい音の中で始まる音は丸ごと消す
+    if (existing.abs >= abs - MELODY_EPSILON && existing.abs < abs + duration - MELODY_EPSILON) {
+      return;
     }
-    position = end;
-  }
+    // 手前から食い込んでいる音は新しい音の直前で切る
+    if (existing.abs < abs && end > abs + MELODY_EPSILON) {
+      kept.push({ ...existing, duration: abs - existing.abs });
+      return;
+    }
+    kept.push(existing);
+  });
+  kept.push({ abs, duration, pitch: note.pitch });
 
-  measures[measureIndex] = {
-    ...target,
-    melody: [...head, { pitch: note.pitch, duration, tie: note.tie }, ...tail],
-  };
-  return normalizeProject({ ...project, measures });
+  return normalizeProject({
+    ...project,
+    measures: unflattenMelody(measures, spans, kept),
+  });
+}
+
+/** 絶対位置 [from, to) にかかる音を消す */
+export function removeMelodyNotes(project: Project, from: number, to: number): Project {
+  const measures = [...project.measures];
+  const spans = measureSpans(project, measures);
+  const kept = flattenMelody(measures, spans).filter((note) => {
+    const end = note.abs + note.duration;
+    return end <= from + MELODY_EPSILON || note.abs >= to - MELODY_EPSILON;
+  });
+  return normalizeProject({
+    ...project,
+    measures: unflattenMelody(measures, spans, kept),
+  });
+}
+
+/** 位置 start に鳴っている音。カーソル上の音を掴むのに使う */
+export function melodyNoteAt(
+  measure: Measure,
+  start: number,
+): { note: MelodyNote; index: number } | null {
+  const melody = melodyOf(measure);
+  for (let i = 0; i < melody.length; i++) {
+    const note = melody[i];
+    if (
+      start >= note.start - MELODY_EPSILON &&
+      start < note.start + note.duration - MELODY_EPSILON
+    ) {
+      return { note, index: i };
+    }
+  }
+  return null;
+}
+
+/** 1つの小節に描くメロディーの一片。小節をまたぐ音は複数の片に分かれる */
+export interface MelodySegment {
+  /** この小節の中で描く範囲（小節頭からの拍） */
+  from: number;
+  to: number;
+  pitch: number;
+  /** 音の始まり・終わりがこの小節にあるか。角の丸めに使う */
+  isStart: boolean;
+  isEnd: boolean;
+  /** 音を持っている小節と、その中での index */
+  ownerIndex: number;
+  noteIndex: number;
+}
+
+/** 小節ごとに、そこに描くべきメロディーの片を求める */
+export function melodySegments(project: Project, spans: MeasureSpan[]): MelodySegment[][] {
+  const result: MelodySegment[][] = project.measures.map(() => []);
+
+  project.measures.forEach((measure, ownerIndex) => {
+    const span = spans[ownerIndex];
+    if (!span) return;
+    measure.melody?.forEach((note, noteIndex) => {
+      const abs = span.start + note.start;
+      const absEnd = abs + note.duration;
+      for (let i = ownerIndex; i < spans.length; i++) {
+        const target = spans[i];
+        if (target.start >= absEnd - MELODY_EPSILON) break;
+        const from = Math.max(0, abs - target.start);
+        const to = Math.min(target.length, absEnd - target.start);
+        if (to - from <= MELODY_EPSILON) continue;
+        result[i].push({
+          from,
+          to,
+          pitch: note.pitch,
+          isStart: i === ownerIndex,
+          isEnd: absEnd <= target.start + target.length + MELODY_EPSILON,
+          ownerIndex,
+          noteIndex,
+        });
+      }
+    });
+  });
+
+  return result;
+}
+
+/** メロディー面のマス1つぶんの長さ。拍子どおりの等分で、コードの刻みとは無関係 */
+export function beatLength(timeSignature: [number, number]): number {
+  return 4 / timeSignature[1];
 }
 
 export type RhythmDivision = 'div4' | 'div8' | 'div16' | 'div4t' | 'div8t';

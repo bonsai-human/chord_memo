@@ -3,12 +3,18 @@ import type {
   Chord,
   EffectiveSettings,
   Measure,
-  MelodySlot,
   Project,
   Slot,
   SlotRef,
 } from '../types';
-import { buildChunks, melodyOf, melodyRange } from '../lib/measures';
+import {
+  buildChunks,
+  measureLength,
+  measureSpans,
+  melodyRange,
+  melodySegments,
+  type MelodySegment,
+} from '../lib/measures';
 import {
   getChordName,
   getDegreeName,
@@ -279,30 +285,40 @@ function SlotView({
 
 /** メロディー面での小節の高さ。音高を縦位置で見せるため広くとる */
 const MELODY_ROW_HEIGHT = 78;
+/** 音を表す帯の高さ */
+const NOTE_HEIGHT = 14;
 
 interface MelodyRowProps {
-  melody: MelodySlot[];
+  /** この小節に描く音の片。小節をまたぐ音は前の小節から流れ込んでくる */
+  segments: MelodySegment[];
   /** 背後に薄く出すコード。刻みが違うので別に受け取る */
   chordLabels: { name: string; duration: number }[];
   measureId: string;
   measureKey: string;
+  /** マスの数と1マスの長さ。拍子どおりの等分 */
+  cells: number;
+  measureBeats: number;
   /** 曲中で使われている音高の範囲。縦位置の基準 */
   range: { low: number; high: number } | null;
-  selectedIndex: number | null;
-  playingIndex: number | null;
-  inSelection: (slotIndex: number) => boolean;
-  onSelect: (slotIndex: number, shiftKey: boolean) => void;
+  /** カーソルの位置（小節頭からの拍）。この小節にないときは null */
+  cursor: number | null;
+  /** 再生中に光らせる音。{ 小節 index, 音の index } で指す */
+  playingNote: { ownerIndex: number; noteIndex: number } | null;
+  inSelection: (cellIndex: number) => boolean;
+  onSelect: (cellIndex: number, shiftKey: boolean) => void;
 }
 
 /** メロディーの1小節。音高に応じて縦位置を変える */
 function MelodyRow({
-  melody,
+  segments,
   chordLabels,
   measureId,
   measureKey,
+  cells,
+  measureBeats,
   range,
-  selectedIndex,
-  playingIndex,
+  cursor,
+  playingNote,
   inSelection,
   onSelect,
 }: MelodyRowProps) {
@@ -352,56 +368,93 @@ function MelodyRow({
         ))}
       </div>
 
-      {melody.map((slot, index) => {
-        const ratio = slot.pitch === null ? 0.5 : (slot.pitch - low) / (high - low);
-        const isSelected = selectedIndex === index;
-        const isPlaying = playingIndex === index;
+      {/* 拍のマス。ここをタップして大まかな位置を決める */}
+      {Array.from({ length: cells }, (_, index) => (
+        <div
+          key={index}
+          id={`melody-${measureId}-${index}`}
+          onClick={(e) => onSelect(index, e.shiftKey)}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            position: 'relative',
+            cursor: 'pointer',
+            borderLeft: index > 0 ? '1px solid var(--border)' : 'none',
+            background: inSelection(index) ? 'var(--in-range)' : 'transparent',
+            zIndex: 1,
+          }}
+        />
+      ))}
+
+      {/* 音。位置と長さをそのまま帯にする。小節をまたぐ音は端を角ばらせる */}
+      {segments.map((segment) => {
+        const ratio = (segment.pitch - low) / (high - low);
+        const isPlaying =
+          playingNote?.ownerIndex === segment.ownerIndex &&
+          playingNote?.noteIndex === segment.noteIndex;
         return (
-          <div
-            key={index}
-            id={`melody-${measureId}-${index}`}
-            onClick={(e) => onSelect(index, e.shiftKey)}
+          <span
+            key={`${segment.ownerIndex}-${segment.noteIndex}-${segment.from}`}
+            id={segment.isStart ? `melody-note-${measureId}-${segment.noteIndex}` : undefined}
             style={{
-              flex: slot.duration || 1,
-              minWidth: 0,
-              position: 'relative',
-              cursor: 'pointer',
-              borderLeft: index > 0 ? '1px solid var(--border)' : 'none',
-              background: isPlaying
-                ? 'var(--selected)'
-                : inSelection(index)
-                  ? 'var(--in-range)'
-                  : 'transparent',
-              outline: isSelected ? '2px solid #6366f1' : 'none',
-              zIndex: isSelected ? 3 : 1,
+              position: 'absolute',
+              left: `calc(${(segment.from / measureBeats) * 100}% + 1px)`,
+              width: `calc(${((segment.to - segment.from) / measureBeats) * 100}% - 2px)`,
+              // 高い音ほど上に置く
+              top: `${(1 - ratio) * (MELODY_ROW_HEIGHT - NOTE_HEIGHT - 8) + 4}px`,
+              height: `${NOTE_HEIGHT}px`,
+              borderRadius: `${segment.isStart ? 3 : 0}px ${segment.isEnd ? 3 : 0}px ${
+                segment.isEnd ? 3 : 0
+              }px ${segment.isStart ? 3 : 0}px`,
+              background: isPlaying ? '#f9a8d4' : '#f472b6',
+              boxShadow: isPlaying ? '0 0 10px #f472b6' : 'none',
+              color: 'var(--bg)',
+              fontSize: '0.65rem',
+              fontWeight: 'bold',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              overflow: 'hidden',
+              pointerEvents: 'none',
+              zIndex: 2,
             }}
           >
-            {slot.pitch !== null && (
-              <span
-                style={{
-                  position: 'absolute',
-                  left: '2px',
-                  right: '2px',
-                  // 高い音ほど上に置く
-                  top: `${(1 - ratio) * (MELODY_ROW_HEIGHT - 22) + 4}px`,
-                  height: '14px',
-                  borderRadius: '3px',
-                  background: slot.tie ? 'rgba(244,114,182,0.35)' : '#f472b6',
-                  color: slot.tie ? '#f472b6' : 'var(--bg)',
-                  fontSize: '0.65rem',
-                  fontWeight: 'bold',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  pointerEvents: 'none',
-                }}
-              >
-                {slot.tie ? '' : getScaleDegree(slot.pitch, measureKey)}
-              </span>
-            )}
-          </div>
+            {segment.isStart ? getScaleDegree(segment.pitch, measureKey) : ''}
+          </span>
         );
       })}
+
+      {/* カーソル。マスの途中にも立つので細い縦線で示す */}
+      {cursor !== null && (
+        <span
+          style={{
+            position: 'absolute',
+            left: `${(cursor / measureBeats) * 100}%`,
+            top: 0,
+            bottom: 0,
+            width: '2px',
+            // 小節の頭に立つときも線が枠に埋もれないよう内側へ寄せる
+            transform: cursor <= 0 ? 'translateX(1px)' : 'translateX(-1px)',
+            background: '#818cf8',
+            boxShadow: '0 0 6px #6366f1',
+            pointerEvents: 'none',
+            zIndex: 4,
+          }}
+        >
+          {/* 縦線だけだと拍の区切りに紛れるので頭に印を付ける */}
+          <span
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: '-3px',
+              width: '8px',
+              height: '4px',
+              borderRadius: '0 0 2px 2px',
+              background: '#818cf8',
+            }}
+          />
+        </span>
+      )}
     </div>
   );
 }
@@ -413,13 +466,16 @@ interface Props {
   playingSlot: {
     measureIndex: number;
     slotIndex: number;
-    /** メロディー面で光らせるマス */
+    /** メロディー面で光らせる音。音を持っている小節の index で指す */
     melodyIndex?: number | null;
+    melodyOwnerIndex?: number | null;
     loopInfo?: { current: number; total: number };
   } | null;
   useDegreeNotation: boolean;
   resolveSettings: (index: number) => EffectiveSettings;
   onSelectSlot: (measureId: string, slotIndex: number, shiftKey: boolean) => void;
+  /** メロディーのカーソル位置（小節頭からの拍） */
+  melodyCursor: { measureId: string; start: number } | null;
   onSelectChunk: (measureId: string, anchor: { top: number; left: number }) => void;
   onToggleExpansion: (measureId: string) => void;
   isMobile: boolean;
@@ -435,6 +491,7 @@ export default function ChordGrid({
   useDegreeNotation,
   resolveSettings,
   onSelectSlot,
+  melodyCursor,
   onSelectChunk,
   onToggleExpansion,
   isMobile,
@@ -447,6 +504,11 @@ export default function ChordGrid({
 
   const contentWidth = isMobile ? window.innerWidth - 32 : DESKTOP_CONTENT_WIDTH;
   const melodyBounds = useMemo(() => melodyRange(project), [project]);
+  const spans = useMemo(() => measureSpans(project), [project]);
+  const segments = useMemo(
+    () => (editMode === 'melody' ? melodySegments(project, spans) : []),
+    [project, spans, editMode],
+  );
   const hasExpanded = project.measures.some((m) => m.isReferenceExpanded && m.referenceLabel);
 
   const nameOf = (chordId: string | null, key: string): string => {
@@ -579,39 +641,52 @@ export default function ChordGrid({
                     (entry.measureIndex === 0 ||
                       project.measures[entry.measureIndex - 1]?.label !== rendered.label);
 
-                  // メロディー面。コードとは別の刻みで並べる
+                  // メロディー面。拍どおりの等分マスに、音を帯で重ねる
                   if (editMode === 'melody') {
                     const source = referenceSource ?? rendered;
+                    // 参照小節は借りてきた表示なので、前の小節からの流れ込みは持たせない
+                    const sourceIndex = referenceSource
+                      ? project.measures.indexOf(referenceSource)
+                      : entry.measureIndex;
+                    const rowSegments = referenceSource
+                      ? (segments[sourceIndex] ?? []).filter((seg) => seg.isStart)
+                      : (segments[entry.measureIndex] ?? []);
                     return (
                       <div className="measure-box" key={virtualId}>
                         <MelodyRow
-                          melody={melodyOf(source, settings.timeSignature)}
+                          segments={rowSegments}
                           chordLabels={source.slots.map((slot) => ({
                             name: nameOf(slot.chordId, settings.key),
                             duration: slot.duration,
                           }))}
                           measureId={origin.id}
                           measureKey={settings.key}
+                          cells={settings.timeSignature[0]}
+                          measureBeats={measureLength(settings.timeSignature)}
                           range={melodyBounds}
-                          selectedIndex={
-                            selectedSlot?.measureId === origin.id ? selectedSlot.slotIndex : null
+                          cursor={
+                            melodyCursor?.measureId === origin.id ? melodyCursor.start : null
                           }
-                          playingIndex={
-                            playingSlot?.measureIndex === entry.measureIndex
-                              ? playingSlot.melodyIndex ?? null
+                          playingNote={
+                            playingSlot?.melodyIndex != null &&
+                            playingSlot.melodyOwnerIndex != null
+                              ? {
+                                  ownerIndex: playingSlot.melodyOwnerIndex,
+                                  noteIndex: playingSlot.melodyIndex,
+                                }
                               : null
                           }
-                          inSelection={(slotIndex) =>
+                          inSelection={(cellIndex) =>
                             isInSelection(
                               entry.measureIndex,
-                              slotIndex,
+                              cellIndex,
                               project.measures,
                               selectedSlot,
                               selectionEnd,
                             )
                           }
-                          onSelect={(slotIndex, shiftKey) =>
-                            onSelectSlot(origin.id, slotIndex, shiftKey)
+                          onSelect={(cellIndex, shiftKey) =>
+                            onSelectSlot(origin.id, cellIndex, shiftKey)
                           }
                         />
                       </div>

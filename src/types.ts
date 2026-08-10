@@ -36,20 +36,24 @@ export interface Slot {
  * メロディーの1マス。コードのスロットとは別の刻みを持つ。
  * pitch は MIDI 番号（60 = C4）。度数表示はその位置のキーから導く
  */
-export interface MelodySlot {
-  /** null は休符 */
-  pitch: number | null;
-  /** 4分音符 = 1 を単位とする長さ */
+/**
+ * メロディーの音。休符は「音が無い」ことで表すので実体を持たない。
+ * 小節をまたぐ音は duration が小節の残りを超えるだけで、タイは使わない。
+ */
+export interface MelodyNote {
+  /** 小節の頭からの位置（4分音符 = 1） */
+  start: number;
+  /** 長さ（4分音符 = 1）。小節の残りを超えてよい */
   duration: number;
-  /** 直前の音を伸ばす */
-  tie?: boolean;
+  /** MIDI ノート番号 */
+  pitch: number;
 }
 
 export interface Measure {
   id: string;
   slots: Slot[];
-  /** メロディー。未設定なら空（休符だけ）とみなす */
-  melody?: MelodySlot[];
+  /** メロディー。start 昇順で、時間軸上で重ならない */
+  melody?: MelodyNote[];
   timeSignature?: [number, number];
   tempo?: number;
   key?: string;
