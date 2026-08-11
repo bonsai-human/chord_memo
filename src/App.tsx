@@ -16,8 +16,10 @@ import {
 } from './lib/measures';
 import * as audio from './lib/audio';
 import {
+  copyMelodyRange,
   copyRange,
   pasteBuffer,
+  pasteMelodyBuffer,
   resolveRange,
   type CopyBuffer,
   type PasteMode,
@@ -559,6 +561,11 @@ export default function App() {
   const inputMelody = useCallback(
     (pitch: number) => {
       if (!project || !selectedSlot) return;
+      // 参照小節は参照元をまるごと借りるので、独自のメロディーを持てない
+      if (selectedMeasure?.referenceLabel) {
+        setToast('参照小節にメロディーは書き込めません');
+        return;
+      }
       history.push(project, 'メロディー入力');
       commit(
         writeMelodyNote(project, selectedSlot.measureId, melodyCursorStart, {
@@ -573,6 +580,7 @@ export default function App() {
     [
       project,
       selectedSlot,
+      selectedMeasure,
       melodyCursorStart,
       melodyDuration,
       history,
@@ -711,11 +719,10 @@ export default function App() {
 
   const handleCopy = useCallback(() => {
     if (!project || !selectedSlot) return;
-    if (editMode === 'melody') {
-      setToast('メロディーのコピーはまだ対応していません');
-      return;
-    }
-    const result = copyRange(project, selectedSlot, selectionEnd, resolveSettings);
+    const result =
+      editMode === 'melody'
+        ? copyMelodyRange(project, selectedSlot, selectionEnd, resolveSettings)
+        : copyRange(project, selectedSlot, selectionEnd, resolveSettings);
     if (result.buffer) {
       setCopyBuffer(result.buffer);
       setSelectionEnd(null);
@@ -727,15 +734,38 @@ export default function App() {
   const handlePaste = useCallback(
     (mode: PasteMode) => {
       if (!project || !selectedSlot || !copyBuffer) return;
-      if (editMode === 'melody') {
-        setToast('メロディーへの貼り付けはまだ対応していません');
+      // 面をまたいだ貼り付けは意味が通らないので弾く
+      if (copyBuffer.kind !== editMode) {
+        setToast(
+          copyBuffer.kind === 'melody'
+            ? 'コピーしたのはメロディーです。メロディー面で貼り付けてください'
+            : 'コピーしたのはコードです。コード面で貼り付けてください',
+        );
         return;
       }
-      history.push(project, mode === 'transposed' ? '移調貼り付け' : '貼り付け');
+
+      const label = mode === 'transposed' ? '移調貼り付け' : '貼り付け';
+      if (copyBuffer.kind === 'melody') {
+        const result = pasteMelodyBuffer(
+          project,
+          copyBuffer,
+          selectedSlot,
+          melodyCursorStart,
+          mode,
+        );
+        if (result.project !== project) {
+          history.push(project, label);
+          commit(result.project);
+        }
+        setToast(result.message);
+        return;
+      }
+
+      history.push(project, label);
       commit(pasteBuffer(project, copyBuffer, selectedSlot, mode));
       setToast(mode === 'transposed' ? '移調して貼り付けました' : '貼り付けました');
     },
-    [project, selectedSlot, copyBuffer, history, commit, editMode],
+    [project, selectedSlot, copyBuffer, history, commit, editMode, melodyCursorStart],
   );
 
   // --- 再生 ---
@@ -1151,7 +1181,7 @@ export default function App() {
           </div>
 
           <ActionBar
-            canPaste={!!copyBuffer}
+            canPaste={!!copyBuffer && copyBuffer.kind === editMode}
             canUndo={history.undoStack.length > 0}
             canRedo={history.redoStack.length > 0}
             isRangeMode={isRangeMode}

@@ -1,5 +1,12 @@
-import type { Chord, EffectiveSettings, Project, Slot, SlotRef } from '../types';
-import { measureLength, normalizeProject, resolveMeasureSettings } from './measures';
+import type { Chord, EffectiveSettings, MelodyNote, Project, Slot, SlotRef } from '../types';
+import {
+  beatLength,
+  measureLength,
+  measureSpans,
+  normalizeProject,
+  pasteMelodyNotes,
+  resolveMeasureSettings,
+} from './measures';
 import {
   getPitchClassName,
   getTranspositionOffset,
@@ -22,10 +29,23 @@ export interface CopiedMeasure {
   effectiveKey: string;
 }
 
-export interface CopyBuffer {
+export interface ChordCopyBuffer {
+  kind: 'chord';
   measures: CopiedMeasure[];
   chords: Record<string, Chord>;
 }
+
+/** メロディーは音そのものを持つ。位置は範囲の先頭からの相対値 */
+export interface MelodyCopyBuffer {
+  kind: 'melody';
+  notes: MelodyNote[];
+  /** 範囲の長さ（拍）。貼り付け先で上書きする幅になる */
+  span: number;
+  /** コピー元の実効キー。移調貼り付けの基準になる */
+  effectiveKey: string;
+}
+
+export type CopyBuffer = ChordCopyBuffer | MelodyCopyBuffer;
 
 export type PasteMode = 'normal' | 'transposed';
 
@@ -112,7 +132,7 @@ export function copyRange(
   }
 
   return {
-    buffer: { measures, chords },
+    buffer: { kind: 'chord', measures, chords },
     message: end ? `${measures.length} 小節分(一部含む)をコピーしました。` : 'コードをコピーしました',
   };
 }
@@ -139,7 +159,7 @@ function transposeChord(chord: Chord, semitones: number, targetKey: string): Cho
  */
 export function pasteBuffer(
   project: Project,
-  buffer: CopyBuffer,
+  buffer: ChordCopyBuffer,
   target: SlotRef,
   mode: PasteMode,
 ): Project {
@@ -298,4 +318,107 @@ export function pasteBuffer(
   });
 
   return normalizeProject({ ...project, measures, chords });
+}
+
+/** 選択範囲を絶対位置（拍）に直す。メロディーは小節の刻みと無関係なので拍で扱う */
+function rangeBeats(
+  project: Project,
+  range: SlotRange,
+): { from: number; to: number } {
+  const spans = measureSpans(project);
+  const cell = (index: number) =>
+    beatLength(resolveMeasureSettings(index, project).timeSignature);
+  return {
+    from: spans[range.from].start + range.firstSlot * cell(range.from),
+    to: spans[range.to].start + (range.lastSlot + 1) * cell(range.to),
+  };
+}
+
+/**
+ * メロディーをコピーする。範囲の中で**始まる**音を、範囲の先頭からの
+ * 相対位置で持つ。範囲をはみ出す音は範囲の終わりで切る。
+ */
+export function copyMelodyRange(
+  project: Project,
+  start: SlotRef,
+  end: SlotRef | null,
+  resolve: (index: number) => EffectiveSettings,
+): CopyResult {
+  const range = resolveRange(project, start, end);
+  if (!range) return { message: 'コピーできませんでした' };
+
+  if (project.measures.slice(range.from, range.to + 1).some((m) => m.referenceLabel)) {
+    return { message: '参照小節を含む範囲はコピーできません' };
+  }
+
+  const { from, to } = rangeBeats(project, range);
+  const spans = measureSpans(project);
+  const notes: MelodyNote[] = [];
+
+  project.measures.forEach((measure, index) => {
+    measure.melody?.forEach((note) => {
+      const abs = spans[index].start + note.start;
+      if (abs < from - EPSILON || abs >= to - EPSILON) return;
+      notes.push({
+        start: abs - from,
+        duration: Math.min(note.duration, to - abs),
+        pitch: note.pitch,
+      });
+    });
+  });
+
+  if (notes.length === 0) return { message: 'コピーする音がありません' };
+
+  return {
+    buffer: {
+      kind: 'melody',
+      notes: notes.sort((a, b) => a.start - b.start),
+      span: to - from,
+      effectiveKey: resolve(range.from).key,
+    },
+    message: `${notes.length} 個の音をコピーしました`,
+  };
+}
+
+/**
+ * メロディーを貼り付ける。カーソル位置から範囲の長さぶんを置き換える。
+ * 移調貼り付けでは、音域が飛ばないよう近い向きへ動かす。
+ */
+export function pasteMelodyBuffer(
+  project: Project,
+  buffer: MelodyCopyBuffer,
+  target: SlotRef,
+  targetStart: number,
+  mode: PasteMode,
+): { project: Project; message: string } {
+  const targetIndex = project.measures.findIndex((m) => m.id === target.measureId);
+  if (targetIndex === -1) return { project, message: '貼り付けできませんでした' };
+
+  const spans = measureSpans(project);
+  const absStart = spans[targetIndex].start + targetStart;
+  const absEnd = absStart + buffer.span;
+
+  // 参照小節はメロディーを持てないので、そこへは貼れない
+  const blocked = project.measures.some((m, i) => {
+    if (!m.referenceLabel) return false;
+    return spans[i].start < absEnd - EPSILON && spans[i].start + spans[i].length > absStart + EPSILON;
+  });
+  if (blocked) return { project, message: '参照小節にはメロディーを貼り付けられません' };
+
+  let semitones = 0;
+  if (mode === 'transposed') {
+    const raw =
+      (getTranspositionOffset(resolveMeasureSettings(targetIndex, project).key) -
+        getTranspositionOffset(buffer.effectiveKey) +
+        12) %
+      12;
+    // 7半音上げるより5半音下げるほうが元の音域に近い
+    semitones = raw > 6 ? raw - 12 : raw;
+  }
+
+  const notes = buffer.notes.map((note) => ({ ...note, pitch: note.pitch + semitones }));
+  return {
+    project: pasteMelodyNotes(project, absStart, buffer.span, notes),
+    message: mode === 'transposed' ? '移調して貼り付けました' : '貼り付けました',
+  };
 }

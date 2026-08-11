@@ -93,9 +93,12 @@ export function normalizeProject(project: Project): Project {
   }
 
   const labels = new Set(measures.map((m) => m.label).filter(Boolean));
-  measures.forEach((m) => {
+  measures.forEach((m, i) => {
     if (m.referenceLabel && !labels.has(m.referenceLabel)) m.referenceLabel = undefined;
     if (!m.referenceLabel) m.isReferenceExpanded = false;
+    // 参照小節は参照元をまるごと借りて鳴らすので、自前のメロディーは
+    // 表示も再生もされない。持たせたままだと見えない差分が残るので捨てる
+    if (m.referenceLabel && m.melody) measures[i] = { ...m, melody: undefined };
   });
 
   // 拍子が変わると小節の長さが変わるので、はみ出した音をここで整える
@@ -486,6 +489,47 @@ export function removeMelodyNotes(project: Project, from: number, to: number): P
     const end = note.abs + note.duration;
     return end <= from + MELODY_EPSILON || note.abs >= to - MELODY_EPSILON;
   });
+  return normalizeProject({
+    ...project,
+    measures: unflattenMelody(measures, spans, kept),
+  });
+}
+
+/**
+ * 絶対位置 absStart から span 拍ぶんを notes で置き換える。貼り付け用。
+ * 重なりの扱いは writeMelodyNote と同じで、手前から伸びていた音は切り、
+ * 範囲の中で始まる音は消す。notes の start は範囲の先頭からの相対値。
+ */
+export function pasteMelodyNotes(
+  project: Project,
+  absStart: number,
+  span: number,
+  notes: MelodyNote[],
+): Project {
+  const measures = [...project.measures];
+  const spans = measureSpans(project, measures);
+  const total = spans[spans.length - 1].start + spans[spans.length - 1].length;
+  const absEnd = Math.min(absStart + span, total);
+
+  const kept: AbsoluteNote[] = [];
+  flattenMelody(measures, spans).forEach((existing) => {
+    const end = existing.abs + existing.duration;
+    if (existing.abs >= absStart - MELODY_EPSILON && existing.abs < absEnd - MELODY_EPSILON) return;
+    if (existing.abs < absStart && end > absStart + MELODY_EPSILON) {
+      kept.push({ ...existing, duration: absStart - existing.abs });
+      return;
+    }
+    kept.push(existing);
+  });
+
+  notes.forEach((note) => {
+    const abs = absStart + note.start;
+    if (abs >= total - MELODY_EPSILON) return;
+    const duration = Math.min(note.duration, absEnd - abs, total - abs);
+    if (duration <= MELODY_EPSILON) return;
+    kept.push({ abs, duration, pitch: note.pitch });
+  });
+
   return normalizeProject({
     ...project,
     measures: unflattenMelody(measures, spans, kept),
