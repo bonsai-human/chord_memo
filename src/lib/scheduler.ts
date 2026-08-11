@@ -1,5 +1,5 @@
 import type { Chord, Project, SwingResolution } from '../types';
-import { lastContentIndex, measureLength, melodyOf } from './measures';
+import { getExpandedMeasures, measureLength, melodyOf } from './measures';
 
 export interface ScheduledEvent {
   type: 'chord' | 'metronome' | 'progress_only' | 'melody';
@@ -31,15 +31,6 @@ interface Options {
   metronome?: boolean;
 }
 
-interface PlanEntry {
-  measure: Project['measures'][number];
-  originalIndex: number;
-  displayIndex: number;
-  loopCurrent?: number;
-  loopTotal?: number;
-  expansionIndex?: number;
-}
-
 /**
  * スウィングによる遅延（秒）。
  * 8n は拍の裏（小数部 0.5）、16n は 0.25 / 0.75 を後ろへずらす。
@@ -61,41 +52,10 @@ function swingDelay(
   return 0;
 }
 
-/** 参照小節を展開した再生順を作る */
-function buildPlan(project: Project): PlanEntry[] {
-  const last = lastContentIndex(project.measures);
-  const target = last === -1 ? [project.measures[0]] : project.measures.slice(0, last + 1);
-  const plan: PlanEntry[] = [];
-
-  target.forEach((measure, displayIndex) => {
-    if (measure.referenceLabel) {
-      const source = project.measures.filter((m) => m.label === measure.referenceLabel);
-      const loops = measure.referenceLoopCount || 1;
-      if (source.length > 0) {
-        for (let loop = 0; loop < loops; loop++) {
-          source.forEach((src, i) => {
-            plan.push({
-              measure: src,
-              originalIndex: project.measures.indexOf(src),
-              displayIndex,
-              loopCurrent: loop + 1,
-              loopTotal: loops,
-              expansionIndex: i,
-            });
-          });
-        }
-        return;
-      }
-    }
-    plan.push({ measure, originalIndex: displayIndex, displayIndex });
-  });
-
-  return plan;
-}
-
 /** プロジェクトを再生用のイベント列に変換する */
 export function buildTimeline(project: Project, options: Options = {}): Timeline {
-  const plan = buildPlan(project);
+  // 参照の展開は書き出しと同じ規則（getExpandedMeasures）に揃える
+  const plan = getExpandedMeasures(project);
   const events: ScheduledEvent[] = [];
 
   let elapsed = 0; // 秒

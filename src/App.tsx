@@ -8,6 +8,7 @@ import {
   normalizeProject,
   removeMelodyNotes,
   resolveMeasureSettings,
+  setSectionLabel,
   splitRhythm,
   writeMelodyNote,
   transposeProject,
@@ -456,9 +457,39 @@ export default function App() {
     [project, selectedSlot, selectedMeasure, history, commit],
   );
 
+  /**
+   * セクションラベルは1小節ではなく選択範囲全体に付ける。
+   * 参照再生は同じ名前を持つ小節をまとめて展開するので、範囲の先頭だけに
+   * 付けると1小節しか鳴らない
+   */
+  const applySectionLabel = useCallback(
+    (label: string | undefined) => {
+      if (!project || !selectedSlot) return;
+      const range = resolveRange(project, selectedSlot, selectionEnd);
+      if (!range) return;
+      if (project.measures.slice(range.from, range.to + 1).some((m) => m.referenceLabel)) {
+        setToast('参照小節を含む範囲にはラベルを付けられません');
+        return;
+      }
+      history.push(project, 'ラベル更新');
+      commit(setSectionLabel(project, range.from, range.to, label));
+      const count = range.to - range.from + 1;
+      setToast(
+        label
+          ? `${count} 小節に「${label}」を設定しました`
+          : `${count} 小節のラベルを削除しました`,
+      );
+    },
+    [project, selectedSlot, selectionEnd, history, commit],
+  );
+
   const applyMeasureSetting = useCallback(
     (patch: Partial<Measure>) => {
       if (!project || !selectedSlot) return;
+      if ('label' in patch) {
+        applySectionLabel(patch.label);
+        return;
+      }
       if (selectedMeasure?.referenceLabel && !('referenceLabel' in patch)) {
         setToast('参照小節の設定は変更できません');
         return;
@@ -466,7 +497,7 @@ export default function App() {
       history.push(project, '小節更新');
       commit(updateMeasureSettings(project, selectedSlot.measureId, patch));
     },
-    [project, selectedSlot, selectedMeasure, history, commit, editMode],
+    [project, selectedSlot, selectedMeasure, history, commit, applySectionLabel],
   );
 
   // --- メロディー編集 ---
@@ -850,6 +881,17 @@ export default function App() {
     [project, commit],
   );
 
+  /** 展開表示をまとめて畳む。メロディー面など個別のバッジが出ない場所からの逃げ道 */
+  const collapseExpansions = useCallback(() => {
+    if (!project || !project.measures.some((m) => m.isReferenceExpanded)) return;
+    commit({
+      ...project,
+      measures: project.measures.map((m) =>
+        m.isReferenceExpanded ? { ...m, isReferenceExpanded: false } : m,
+      ),
+    });
+  }, [project, commit]);
+
   // --- プロジェクト操作 ---
 
   const createProject = () => {
@@ -1133,6 +1175,7 @@ export default function App() {
               setMenu({ kind: 'settings', anchor });
             }}
             onToggleExpansion={toggleExpansion}
+            onCollapseExpansions={collapseExpansions}
             isMobile={isMobile}
             editMode={editMode}
           />

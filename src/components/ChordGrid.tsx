@@ -284,6 +284,38 @@ function SlotView({
   );
 }
 
+/**
+ * 展開表示を畳むためのバッジ。展開した各周回の先頭に出す。
+ * 展開中は参照小節のバッジ（※ ラベル名）が消えるので、これが唯一の戻り道になる
+ */
+function CollapseBadge({ loopLabel, onClick }: { loopLabel: string | null; onClick: () => void }) {
+  return (
+    <div
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      style={{
+        position: 'absolute',
+        top: -12,
+        right: 0,
+        background: 'var(--border)',
+        color: 'var(--accent)',
+        fontSize: '0.6rem',
+        padding: '2px 6px',
+        borderRadius: '4px',
+        border: '1px solid var(--accent)',
+        zIndex: 30,
+        cursor: 'pointer',
+        fontWeight: 'bold',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      展開中{loopLabel ? ` ${loopLabel}` : ''} (タップで閉じる)
+    </div>
+  );
+}
+
 /** メロディー面での小節の高さ。音高を縦位置で見せるため広くとる */
 const MELODY_ROW_HEIGHT = 78;
 /** 音を表す帯の高さ */
@@ -520,6 +552,7 @@ interface Props {
   selectedMelodyNote: { ownerIndex: number; noteIndex: number } | null;
   onSelectChunk: (measureId: string, anchor: { top: number; left: number }) => void;
   onToggleExpansion: (measureId: string) => void;
+  onCollapseExpansions: () => void;
   isMobile: boolean;
   /** コード面かメロディー面か */
   editMode: 'chord' | 'melody';
@@ -537,6 +570,7 @@ export default function ChordGrid({
   selectedMelodyNote,
   onSelectChunk,
   onToggleExpansion,
+  onCollapseExpansions,
   isMobile,
   editMode,
 }: Props) {
@@ -663,7 +697,10 @@ export default function ChordGrid({
                         origin: measure,
                         measureIndex,
                         virtualId: `${measure.id}-loop-${loop}-${i}`,
-                        isExpansionStart: loop > 0 && i === 0,
+                        // 周回の先頭に畳むためのバッジを出す。1周だけの参照でも
+                        // 出さないと展開したまま戻せなくなる
+                        isExpansionStart: i === 0,
+                        loopLabel: loops > 1 ? `${loop + 1}/${loops}` : null,
                       })),
                     )
                   : [
@@ -673,6 +710,7 @@ export default function ChordGrid({
                         measureIndex,
                         virtualId: measure.id,
                         isExpansionStart: false,
+                        loopLabel: null,
                       },
                     ];
 
@@ -717,6 +755,12 @@ export default function ChordGrid({
                     );
                     return (
                       <div className="measure-box" key={virtualId}>
+                        {isExpansionStart && (
+                          <CollapseBadge
+                            loopLabel={entry.loopLabel}
+                            onClick={() => onToggleExpansion(origin.id)}
+                          />
+                        )}
                         <MelodyRow
                           segments={rowSegments}
                           chordLabels={source.slots.map((slot) => ({
@@ -806,29 +850,10 @@ export default function ChordGrid({
                         )}
 
                         {isExpansionStart && (
-                          <div
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onToggleExpansion(origin.id);
-                            }}
-                            style={{
-                              position: 'absolute',
-                              top: -12,
-                              left: 0,
-                              background: 'var(--border)',
-                              color: 'var(--accent)',
-                              fontSize: '0.6rem',
-                              padding: '2px 6px',
-                              borderRadius: '4px',
-                              border: '1px solid var(--accent)',
-                              zIndex: 30,
-                              cursor: 'pointer',
-                              fontWeight: 'bold',
-                              whiteSpace: 'nowrap',
-                            }}
-                          >
-                            展開中 (タップで閉じる)
-                          </div>
+                          <CollapseBadge
+                            loopLabel={entry.loopLabel}
+                            onClick={() => onToggleExpansion(origin.id)}
+                          />
                         )}
 
                         {slots.map((slot, slotIndex) => {
@@ -912,6 +937,21 @@ export default function ChordGrid({
         >
           <span style={{ fontSize: '0.6rem' }}>●</span>
           参照セクションを展開表示中
+          <button
+            onClick={onCollapseExpansions}
+            style={{
+              background: 'var(--border)',
+              color: 'var(--accent)',
+              border: '1px solid var(--accent)',
+              borderRadius: '4px',
+              padding: '2px 8px',
+              fontSize: '0.7rem',
+              fontWeight: 'bold',
+              cursor: 'pointer',
+            }}
+          >
+            すべて閉じる
+          </button>
         </div>
       )}
     </div>
