@@ -174,20 +174,7 @@ export default function MelodyKeyboard({
 
   if (!isSlotSelected) {
     return (
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          height: '70px',
-          color: 'var(--text-dim)',
-          border: '1px dashed var(--border)',
-          borderRadius: '8px',
-          margin: '10px',
-        }}
-      >
-        音を置く位置を選んでください
-      </div>
+      <div className="keyboard-placeholder">音を置く位置を選んでください</div>
     );
   }
 
@@ -364,15 +351,12 @@ export default function MelodyKeyboard({
               }}
               onClick={() => onInput(target)}
             >
-              <span style={{ fontSize: '1.05rem', fontWeight: 'bold' }}>{degree}</span>
-              {/* オクターブまで出しておくと、▼▲ が要るかを押す前に判断できる */}
-              <span
-                style={{
-                  fontSize: '0.62rem',
-                  color: isCurrent ? 'var(--bg)' : 'var(--text-dim)',
-                }}
-              >
-                {getNoteName(target)}
+              {/*
+                表記はグリッドと揃える。絶対表記のときはオクターブまで出す
+                ので、▼▲ が要るかを押す前に判断できる
+              */}
+              <span style={{ fontSize: '1.05rem', fontWeight: 'bold' }}>
+                {useDegreeNotation ? degree : getNoteName(target, projectKey)}
               </span>
             </button>
           );

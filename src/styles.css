@@ -127,6 +127,18 @@ button {
   border-right: none;
 }
 
+/* キーボードの「選んでください」表示。コード面とメロディー面で高さを揃える */
+.keyboard-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100px;
+  margin: 10px;
+  color: var(--text-dim);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+
 .long-press-active {
   user-select: none;
 }

@@ -1,7 +1,6 @@
 import { Settings } from 'lucide-react';
 import type { InstrumentId, Project } from '../types';
 import { getNoteName } from '../lib/musicTheory';
-import { MAX_MELODY_VOLUME } from '../lib/storage';
 import Modal from './Modal';
 
 const INSTRUMENTS: { id: InstrumentId; name: string }[] = [
@@ -196,7 +195,7 @@ export default function GeneralSettingsModal({
           <input
             type="range"
             min="0"
-            max={MAX_MELODY_VOLUME}
+            max="100"
             value={project.melodyVolume}
             onChange={(e) => onUpdate({ melodyVolume: parseInt(e.target.value, 10) })}
             style={{ accentColor: '#f472b6' }}

@@ -2,6 +2,7 @@ import * as Tone from 'tone';
 import type { Chord, InstrumentId, Project } from '../types';
 import { getIntervals, rootOffset } from './musicTheory';
 import { INSTRUMENTS, SAMPLE_BASE_URL } from './instruments';
+import { MELODY_GAIN_AT_FULL } from './storage';
 import * as youtube from './youtube';
 import {
   buildTimeline,
@@ -11,6 +12,140 @@ import {
   type SlotPosition,
   type Timeline,
 } from './scheduler';
+
+/**
+ * --- AudioContext の生存管理 ---
+ *
+ * iOS（Safari / Chrome とも中身は WebKit）では、他アプリへ切り替えたり
+ * 着信が入ったりすると AudioContext が interrupted 状態に落ちる。この状態では
+ * `resume()` の返す Promise が**解決も拒否もしない**ことがあり、
+ * `await Tone.start()` の先へ進めなくなる。再生ボタンを押しても
+ * 例外が出ないので通知も出せず、ただ黙って無音になる。
+ *
+ * 対策は「待ち時間を切って」「本当に時計が進んでいるか確かめて」「駄目なら
+ * コンテキストごと作り直す」の3段構え。作り直しは iOS の制約でユーザー操作の
+ * 中でしか起動できないため、タップの同期処理から呼べる形にしてある。
+ */
+
+/** resume がハングしたと判断するまでの待ち時間 */
+const RESUME_TIMEOUT_MS = 400;
+
+/** 復帰を試すべきか。バックグラウンドから戻ったときに立つ */
+let needsHealthCheck = false;
+
+/** 音声が死んでいて回復もできなかったときに呼ばれる */
+let onAudioLost: (() => void) | null = null;
+
+export function setAudioLostHandler(handler: (() => void) | null): void {
+  onAudioLost = handler;
+}
+
+function contextState(): string {
+  // interrupted は WebKit 独自なので型に無い
+  return Tone.getContext().rawContext.state as string;
+}
+
+/** 生成した音源やノードを全部捨てる。次に使うときに作り直される */
+function disposeGraph(): void {
+  instrument?.dispose();
+  melodyInstrument?.dispose();
+  metronomeSynth?.dispose();
+  volumeNode?.dispose();
+  melodyVolumeNode?.dispose();
+  referencePlayer?.dispose();
+  referenceVolumeNode?.dispose();
+  instrument = null;
+  melodyInstrument = null;
+  metronomeSynth = null;
+  volumeNode = null;
+  melodyVolumeNode = null;
+  referencePlayer = null;
+  referenceVolumeNode = null;
+  loadedId = null;
+  melodyLoadedId = null;
+  loadingId = null;
+  loadingPromise = null;
+  previewTones = [];
+}
+
+/**
+ * コンテキストを作り直す。**ユーザー操作の中から同期的に呼ぶこと。**
+ * iOS では操作の外で作った AudioContext は起動できない。
+ */
+function rebuildContext(): void {
+  const previous = Tone.getContext();
+  disposeGraph();
+  Tone.setContext(new Tone.Context({ latencyHint: 'interactive' }));
+  // 古いほうは後始末だけして捨てる。失敗しても新しい方には影響しない
+  try {
+    void previous.dispose();
+  } catch {
+    /* 壊れたコンテキストは dispose も失敗しうる */
+  }
+}
+
+/** 時計が実際に進んでいるか。running を名乗っていても止まっていることがある */
+async function clockIsRunning(): Promise<boolean> {
+  const before = Tone.getContext().currentTime;
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  return Tone.getContext().currentTime > before;
+}
+
+/**
+ * 音を出す前に必ず通す。生きていれば即 true。
+ * resume で復帰しなければ作り直し、それも駄目なら false を返す。
+ */
+async function ensureAudioReady(): Promise<boolean> {
+  if (contextState() === 'running' && !needsHealthCheck) return true;
+
+  // ハングすることがあるので待ち時間を切る
+  await Promise.race([
+    Tone.start().catch(() => undefined),
+    new Promise((resolve) => setTimeout(resolve, RESUME_TIMEOUT_MS)),
+  ]);
+
+  if (contextState() === 'running' && (await clockIsRunning())) {
+    needsHealthCheck = false;
+    return true;
+  }
+
+  rebuildContext();
+  await Promise.race([
+    Tone.start().catch(() => undefined),
+    new Promise((resolve) => setTimeout(resolve, RESUME_TIMEOUT_MS)),
+  ]);
+
+  const alive = contextState() === 'running' && (await clockIsRunning());
+  needsHealthCheck = false;
+  if (!alive) onAudioLost?.();
+  return alive;
+}
+
+/**
+ * バックグラウンドから戻ったことを知らせる。次に音を出すときに健全性を確かめる。
+ * ここで resume まではしない（操作の外なので iOS では起動できない）。
+ */
+export function markPossiblyInterrupted(): void {
+  needsHealthCheck = true;
+}
+
+/**
+ * タップの**同期処理**から呼ぶ復帰。iOS はユーザー操作の中でしか
+ * 新しいコンテキストを起動できないので、await を挟む前にここを通す。
+ */
+export function recoverOnUserGesture(): void {
+  if (!needsHealthCheck) return;
+  const state = contextState();
+  if (state === 'running') return;
+  if (state === 'suspended') {
+    // 素直に起きる見込みがあるほうは resume を投げるだけ
+    void Tone.getContext().rawContext.resume().catch(() => undefined);
+    return;
+  }
+  // interrupted / closed は resume が返らないことがあるので作り直す
+  rebuildContext();
+  void Tone.getContext().rawContext.resume().catch(() => undefined);
+}
 
 /** ベース音を置くオクターブ（MIDI） */
 const BASS_BASE = 36;
@@ -212,7 +347,7 @@ function melodyOutput(): Tone.Volume {
 }
 
 export function setMelodyVolume(value: number): void {
-  const normalized = Math.max(0, Math.min(100, value)) / 100;
+  const normalized = (Math.max(0, Math.min(100, value)) / 100) * MELODY_GAIN_AT_FULL;
   melodyOutput().volume.value = normalized === 0 ? -Infinity : Tone.gainToDb(normalized);
 }
 
@@ -253,7 +388,7 @@ function activeMelodyInstrument(): Tone.Sampler | Tone.PolySynth {
 
 /** 入力したメロディーの音を1つ鳴らす */
 export async function playMelodyNote(pitch: number): Promise<void> {
-  await Tone.start();
+  if (!(await ensureAudioReady())) return;
   const player = activeMelodyInstrument();
   player.releaseAll(Tone.now());
   player.triggerAttackRelease(
@@ -426,7 +561,7 @@ let previewTones: number[] = [];
 
 /** 単発プレビュー */
 export async function playChord(chord: Chord, voicing: VoicingOptions): Promise<void> {
-  await Tone.start();
+  if (!(await ensureAudioReady())) return;
   const player = activeInstrument();
   player.releaseAll(Tone.now());
   if (chord.isNC) {
@@ -509,7 +644,7 @@ export async function playGrid({
   onEnd,
 }: PlayOptions): Promise<void> {
   stop();
-  await Tone.start();
+  if (!(await ensureAudioReady())) throw new Error('audio-context-unavailable');
 
   const timeline = buildTimeline(project, { metronome: project.metronomeEnabled });
   const transport = Tone.getTransport();

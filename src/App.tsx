@@ -81,6 +81,8 @@ export default function App() {
   const [showExport, setShowExport] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
+  /** 音声が完全に死んで復帰もできなかったとき */
+  const [audioLost, setAudioLost] = useState(false);
   const [copyBuffer, setCopyBuffer] = useState<CopyBuffer | null>(null);
 
   const history = useHistory();
@@ -147,6 +149,35 @@ export default function App() {
     container.scrollBy({ top: target.top - view.top - view.height / 3, behavior: 'smooth' });
   }, [isPlaying, playingMeasureIndex, playingSlotIndex, playingMelodyIndex, project, editMode]);
 
+  /**
+   * 選択中のマスが見えるようにグリッドを追従させる。
+   *
+   * メロディーは音を置くとカーソルが勝手に進むので、放っておくと画面外まで
+   * 打ててしまう。マージンを1行ぶん取り、**次の小節が見えている**状態を保つ。
+   * スクロールコンテナはキーボードの外側なので、コンテナ内に見えていれば
+   * キーボードにも隠れていない。
+   */
+  const selectedMeasureId = selectedSlot?.measureId;
+  const selectedSlotIndex = selectedSlot?.slotIndex;
+  useEffect(() => {
+    if (isPlaying || selectedMeasureId === undefined || selectedSlotIndex === undefined) return;
+    const container = gridScrollRef.current;
+    if (!container) return;
+    const prefix = editMode === 'melody' ? 'melody' : 'slot';
+    const cell = document.getElementById(`${prefix}-${selectedMeasureId}-${selectedSlotIndex}`);
+    if (!cell) return;
+
+    const view = container.getBoundingClientRect();
+    const target = cell.getBoundingClientRect();
+    // 次の小節ぶんの余裕。これを切ったら追う
+    const margin = target.height;
+    if (target.top >= view.top && target.bottom + margin <= view.bottom) return;
+
+    const above = target.top - view.top;
+    const below = target.bottom + margin - view.bottom;
+    container.scrollBy({ top: above < 0 ? above : below, behavior: 'smooth' });
+  }, [selectedMeasureId, selectedSlotIndex, editMode, isPlaying]);
+
   // --- 音源 ---
 
   const instrumentId = project?.instrument;
@@ -185,6 +216,30 @@ export default function App() {
   }, [melodyVolume]);
 
   useEffect(() => () => audio.stop(), []);
+
+  /**
+   * バックグラウンドから戻ると AudioContext が止まっていることがある。
+   * iOS では新しいコンテキストをユーザー操作の中でしか起動できないので、
+   * 復帰の合図だけ立てておき、実際の復帰は次のタップの**同期処理**で行う。
+   */
+  useEffect(() => {
+    audio.setAudioLostHandler(() => setAudioLost(true));
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') audio.markPossiblyInterrupted();
+    };
+    const onGesture = () => {
+      audio.recoverOnUserGesture();
+      setAudioLost(false);
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    // capture 段で拾い、ボタンの onClick より先に同期的に復帰させる
+    window.addEventListener('pointerdown', onGesture, true);
+    return () => {
+      audio.setAudioLostHandler(null);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pointerdown', onGesture, true);
+    };
+  }, []);
 
   // 選択中プロジェクトのオーディオを IndexedDB から復帰させる
   const projectId = project?.id;
@@ -744,7 +799,11 @@ export default function App() {
       })
       .catch((e) => {
         console.error(e);
-        setToast('再生に失敗しました');
+        setToast(
+          e?.message === 'audio-context-unavailable'
+            ? '音声を再開できませんでした。ページを再読み込みしてください'
+            : '再生に失敗しました',
+        );
         setIsPlaying(false);
         setPlayingSlot(null);
       });
@@ -1205,6 +1264,47 @@ export default function App() {
           onConfirm={() => removeProject(deleteTarget.id)}
           onClose={() => setDeleteTarget(null)}
         />
+      )}
+
+      {/*
+        コンテキストの作り直しでも復帰できなかったとき。再読み込みは確実に効くので
+        行き止まりを作らない
+      */}
+      {audioLost && (
+        <div
+          style={{
+            position: 'fixed',
+            top: '12px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 4000,
+            background: 'var(--danger)',
+            color: 'white',
+            padding: '10px 14px',
+            borderRadius: '8px',
+            fontSize: '0.8rem',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+            boxShadow: '0 10px 25px -10px rgba(0,0,0,0.8)',
+          }}
+        >
+          音声が停止しました
+          <button
+            onClick={() => window.location.reload()}
+            style={{
+              background: 'white',
+              color: 'var(--danger)',
+              border: 'none',
+              borderRadius: '6px',
+              padding: '6px 12px',
+              fontWeight: 'bold',
+              cursor: 'pointer',
+            }}
+          >
+            再読み込み
+          </button>
+        </div>
       )}
 
       {toast && (
