@@ -226,6 +226,42 @@ export function updateMeasureSettings(
 }
 
 /**
+ * 範囲の小節にセクションラベルを付け外しする。
+ * ラベルは「範囲全体で1つのセクション」を表すので、範囲内の小節すべてに
+ * 同じ名前を持たせる。参照再生はこの名前を持つ小節をまとめて展開する。
+ */
+export function setSectionLabel(
+  project: Project,
+  from: number,
+  to: number,
+  label: string | undefined,
+): Project {
+  const measures = project.measures.map((m, i) =>
+    i >= from && i <= to ? { ...m, label } : m,
+  );
+
+  // セクションを丸ごと付け替えたときは、そのラベルを指す参照も追従させる。
+  // 放っておくと正規化で宙に浮いた参照として消えてしまう
+  if (label) {
+    const previous = new Set(
+      project.measures
+        .slice(from, to + 1)
+        .map((m) => m.label)
+        .filter((l): l is string => !!l && l !== label),
+    );
+    previous.forEach((old) => {
+      // 範囲の外にも同名の小節が残るなら、そのセクションはまだ生きている
+      if (project.measures.some((m, i) => (i < from || i > to) && m.label === old)) return;
+      measures.forEach((m, i) => {
+        if (m.referenceLabel === old) measures[i] = { ...m, referenceLabel: label };
+      });
+    });
+  }
+
+  return normalizeProject({ ...project, measures });
+}
+
+/**
  * 曲全体を移調する。キー指定と、そこにぶら下がるコードをまとめて動かす。
  * 音名の綴りは移調後のキーに従う。
  */
@@ -694,6 +730,8 @@ export function splitRhythm(
 export interface ExpandedMeasure {
   measure: Measure;
   originalIndex: number;
+  /** 表示上の位置。参照の展開ぶんは参照小節の位置を指す */
+  displayIndex: number;
   loopCurrent?: number;
   loopTotal?: number;
   expansionIndex?: number;
@@ -723,6 +761,7 @@ export function getExpandedMeasures(project: Project): ExpandedMeasure[] {
             result.push({
               measure: copy,
               originalIndex: project.measures.indexOf(src),
+              displayIndex: index,
               loopCurrent: loop + 1,
               loopTotal: loops,
               expansionIndex: i,
@@ -732,7 +771,7 @@ export function getExpandedMeasures(project: Project): ExpandedMeasure[] {
         return;
       }
     }
-    result.push({ measure, originalIndex: index });
+    result.push({ measure, originalIndex: index, displayIndex: index });
   });
 
   return result;
