@@ -552,6 +552,17 @@ export default function ChordGrid({
     () => (editMode === 'melody' ? melodySegments(project, spans) : []),
     [project, spans, editMode],
   );
+  /** ラベルごとの小節 index。参照表示でどの音を描くかの判定に使う */
+  const sectionIndices = useMemo(() => {
+    const map = new Map<string, Set<number>>();
+    project.measures.forEach((m, i) => {
+      if (!m.label) return;
+      const set = map.get(m.label) ?? new Set<number>();
+      set.add(i);
+      map.set(m.label, set);
+    });
+    return map;
+  }, [project.measures]);
   const hasExpanded = project.measures.some((m) => m.isReferenceExpanded && m.referenceLabel);
 
   const nameOf = (chordId: string | null, key: string): string => {
@@ -687,13 +698,23 @@ export default function ChordGrid({
                   // メロディー面。拍どおりの等分マスに、音を帯で重ねる
                   if (editMode === 'melody') {
                     const source = referenceSource ?? rendered;
-                    // 参照小節は借りてきた表示なので、前の小節からの流れ込みは持たせない
-                    const sourceIndex = referenceSource
-                      ? project.measures.indexOf(referenceSource)
+                    /*
+                      参照は借りものの表示。折りたたみなら参照先の先頭、展開なら
+                      並べた小節そのものを描くので、entry.measureIndex（参照小節
+                      自身）ではなく実際に描いている小節の index を見る。
+
+                      描くのはそのセクションの中で始まる音だけ。セクションの外から
+                      流れ込む音は参照再生では鳴らないので出さない。逆にセクション内
+                      で小節をまたぐ音は続きも描く。
+                    */
+                    const borrowedLabel = origin.referenceLabel;
+                    const sourceIndex = borrowedLabel
+                      ? project.measures.indexOf(source)
                       : entry.measureIndex;
-                    const rowSegments = referenceSource
-                      ? (segments[sourceIndex] ?? []).filter((seg) => seg.isStart)
-                      : (segments[entry.measureIndex] ?? []);
+                    const owners = borrowedLabel ? sectionIndices.get(borrowedLabel) : null;
+                    const rowSegments = (segments[sourceIndex] ?? []).filter(
+                      (seg) => !owners || owners.has(seg.ownerIndex),
+                    );
                     return (
                       <div className="measure-box" key={virtualId}>
                         <MelodyRow
@@ -721,7 +742,7 @@ export default function ChordGrid({
                                 }
                               : null
                           }
-                          selectedNote={referenceSource ? null : selectedMelodyNote}
+                          selectedNote={borrowedLabel ? null : selectedMelodyNote}
                           inSelection={(cellIndex) =>
                             isInSelection(
                               entry.measureIndex,
