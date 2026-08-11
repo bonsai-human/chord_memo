@@ -6,12 +6,30 @@ const DEFAULT_SLOT_COUNT = 4;
 const DEFAULT_MASTER_VOLUME = 50;
 /** メロディーの既定。コードをピアノにしたときに埋もれない音色を選ぶ */
 const DEFAULT_MELODY_INSTRUMENT: InstrumentId = 'synth-lead';
+const DEFAULT_MELODY_VOLUME = 50;
+
 /**
- * メロディーの音量上限。コードと重ねるとこれ以上は歪むので、
- * スライダー自体をここで打ち止めにする
+ * メロディー音量スライダー 100% にあたるゲイン。
+ * コードと重ねると 0.6 では歪み、0.3 でちょうど良かったので、
+ * その 0.3 が 80% の位置に来るように上限を決めてある（0.3 ÷ 0.8）。
+ * 目盛りの意味そのものなので、保存データの版と一緒にここで持つ。
  */
-export const MAX_MELODY_VOLUME = 30;
-const DEFAULT_MELODY_VOLUME = MAX_MELODY_VOLUME;
+export const MELODY_GAIN_AT_FULL = 0.375;
+
+/**
+ * 保存データの版。読み込み時の変換に使う。
+ *  1 … melodyVolume が「ゲイン×100」だった（100% = ゲイン 1.0）
+ *  2 … melodyVolume は目盛りそのもの（100% = MELODY_GAIN_AT_FULL）
+ */
+const SCHEMA_VERSION = 2;
+
+/** v1 の音量を新しい目盛りへ読み替える。上限で頭打ちになるだけで、音は大きくならない */
+function migrateMelodyVolume(raw: any): number {
+  if ((raw.schemaVersion ?? 1) >= 2) return raw.melodyVolume ?? DEFAULT_MELODY_VOLUME;
+  const legacy = raw.melodyVolume;
+  if (typeof legacy !== 'number') return DEFAULT_MELODY_VOLUME;
+  return Math.min(100, Math.round(legacy / MELODY_GAIN_AT_FULL));
+}
 
 /**
  * メロディーを読む。
@@ -106,6 +124,7 @@ export function createEmptyProject(): Project {
   const first = createEmptyMeasure(4, [4, 4], 120, 'C');
   return {
     id: generateUUID(),
+    schemaVersion: SCHEMA_VERSION,
     name: '名称未設定のプロジェクト',
     description: '',
     tempo: 120,
@@ -198,6 +217,7 @@ function migrate(raw: any): Project {
 
   return {
     ...raw,
+    schemaVersion: SCHEMA_VERSION,
     key: raw.key || 'C',
     instrument,
     voicingOptimize: raw.voicingOptimize ?? true,
@@ -208,8 +228,7 @@ function migrate(raw: any): Project {
     // 以前は演奏音と同期音源が audioVolume を共用していた。演奏音は分離する
     masterVolume: raw.masterVolume ?? DEFAULT_MASTER_VOLUME,
     melodyInstrument: raw.melodyInstrument || DEFAULT_MELODY_INSTRUMENT,
-    // 上限を下げる前に保存された値が残っていることがあるので丸める
-    melodyVolume: Math.min(raw.melodyVolume ?? DEFAULT_MELODY_VOLUME, MAX_MELODY_VOLUME),
+    melodyVolume: migrateMelodyVolume(raw),
     audioUrl: raw.audioUrl || undefined,
     audioOffset: raw.audioOffset ?? 0,
     audioVolume: raw.audioVolume ?? 80,

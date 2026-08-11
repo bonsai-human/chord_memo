@@ -67,6 +67,8 @@ export interface Measure {
 
 export interface Project {
   id: string;
+  /** 保存データの版。未設定は 1 とみなす */
+  schemaVersion?: number;
   name: string;
   description: string;
   tempo: number;

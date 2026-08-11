@@ -75,20 +75,7 @@ export default function ChordKeyboard({
 
   if (!isSlotSelected) {
     return (
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          height: '100px',
-          color: 'var(--text-dim)',
-          border: '1px dashed var(--border)',
-          borderRadius: '8px',
-          margin: '10px',
-        }}
-      >
-        拍を選択してください
-      </div>
+      <div className="keyboard-placeholder">拍を選択してください</div>
     );
   }
 
