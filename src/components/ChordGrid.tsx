@@ -360,6 +360,8 @@ interface MelodyRowProps {
   cursor: number | null;
   /** 再生中に光らせる音。{ 小節 index, 音の index } で指す */
   playingNote: { ownerIndex: number; noteIndex: number } | null;
+  /** 再生位置のマス。音が鳴っていない間も位置が分かるように塗る */
+  playingCell: number | null;
   /** いま編集の対象になっている音。同じ指し方 */
   selectedNote: { ownerIndex: number; noteIndex: number } | null;
   inSelection: (cellIndex: number) => boolean;
@@ -379,6 +381,7 @@ function MelodyRow({
   range,
   cursor,
   playingNote,
+  playingCell,
   selectedNote,
   inSelection,
   onSelect,
@@ -442,8 +445,14 @@ function MelodyRow({
             position: 'relative',
             cursor: 'pointer',
             borderLeft: index > 0 ? '1px solid var(--border)' : 'none',
-            // 対象を示すのはカーソルと選択ノートなので、マスの塗りは控えめに
-            background: inSelection(index) ? 'rgba(99, 102, 241, 0.18)' : 'transparent',
+            // 対象を示すのはカーソルと選択ノートなので、マスの塗りは控えめに。
+            // 再生位置だけは音が鳴っていない間の手がかりなので濃いめに出す
+            background:
+              playingCell === index
+                ? 'rgba(79, 70, 229, 0.55)'
+                : inSelection(index)
+                  ? 'rgba(99, 102, 241, 0.18)'
+                  : 'transparent',
             zIndex: 1,
           }}
         />
@@ -542,6 +551,8 @@ interface Props {
     melodyIndex?: number | null;
     melodyOwnerIndex?: number | null;
     loopInfo?: { current: number; total: number };
+    /** メロディー面で塗る拍のマス */
+    beatCell?: number | null;
   } | null;
   useDegreeNotation: boolean;
   resolveSettings: (index: number) => EffectiveSettings;
@@ -784,6 +795,11 @@ export default function ChordGrid({
                                   ownerIndex: playingSlot.melodyOwnerIndex,
                                   noteIndex: playingSlot.melodyIndex,
                                 }
+                              : null
+                          }
+                          playingCell={
+                            playingSlot?.measureIndex === entry.measureIndex
+                              ? (playingSlot.beatCell ?? null)
                               : null
                           }
                           selectedNote={borrowedLabel ? null : selectedMelodyNote}

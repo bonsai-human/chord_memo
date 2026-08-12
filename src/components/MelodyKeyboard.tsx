@@ -20,6 +20,19 @@ function noteValueLabel(value: number, dotted: boolean, triplet: boolean): strin
   return `${dotted ? '付点' : ''}${base}${triplet ? '3連' : ''}`;
 }
 
+/**
+ * 音の長さを音価の名前で表す。掴んでいる音の長さを添えるのに使う。
+ * 音価ボタンは入力用の値を示すので、既存の音の長さはこちらで見せる
+ */
+function describeDuration(duration: number): string {
+  for (const { value, label } of NOTE_VALUES) {
+    if (Math.abs(duration - value) < 0.001) return label;
+    if (Math.abs(duration - value * 1.5) < 0.001) return `付点${label}`;
+    if (Math.abs(duration - (value * 2) / 3) < 0.001) return `${label}3連`;
+  }
+  return `${Math.round(duration * 100) / 100}拍`;
+}
+
 /** 拍数の表示。3連は割り切れないので分数のまま出さず小数2桁に丸める */
 function beatsLabel(value: number, dotted: boolean, triplet: boolean): string {
   const beats = value * (dotted ? 1.5 : 1) * (triplet ? 2 / 3 : 1);
@@ -287,21 +300,36 @@ export default function MelodyKeyboard({
         </button>
         <span
           style={{
-            fontSize: '1rem',
-            fontWeight: 'bold',
-            color: pitch === null ? 'var(--text-muted)' : '#f472b6',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            lineHeight: 1.15,
             minWidth: '92px',
             textAlign: 'center',
             // 半音ボタンと隣り合うので、誤タップしないよう左右を空ける
             margin: '0 12px',
           }}
         >
-          {/* 度数はすぐ下の 1〜7 ボタンにも出ているので、ここは片方だけ */}
-          {pitch === null
-            ? '—'
-            : useDegreeNotation
-              ? getScaleDegree(pitch, projectKey)
-              : getNoteName(pitch, projectKey)}
+          <span
+            style={{
+              fontSize: '1rem',
+              fontWeight: 'bold',
+              color: pitch === null ? 'var(--text-muted)' : '#f472b6',
+            }}
+          >
+            {/* 度数はすぐ下の 1〜7 ボタンにも出ているので、ここは片方だけ */}
+            {pitch === null
+              ? '—'
+              : useDegreeNotation
+                ? getScaleDegree(pitch, projectKey)
+                : getNoteName(pitch, projectKey)}
+          </span>
+          {/* 掴んでいる音の長さ。音価ボタンはこれに追随しないので、ここで見せる */}
+          {selected && (
+            <span style={{ fontSize: '0.62rem', color: 'var(--text-dim)' }}>
+              {describeDuration(selected.duration)}
+            </span>
+          )}
         </span>
         <button
           className="step-btn"

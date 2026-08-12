@@ -47,6 +47,11 @@ import { parseImport } from './lib/importers';
 
 const MOBILE_BREAKPOINT = 768;
 
+/** 音の同一性。長さや高さを直しても start は動かないので、これで追える */
+const noteKey = (measureId: string, start: number): string => `${measureId}@${start.toFixed(4)}`;
+const noteKeyOf = (hit: { measureId: string; note: { start: number } }): string =>
+  noteKey(hit.measureId, hit.note.start);
+
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState<Project | null>(null);
@@ -74,6 +79,8 @@ export default function App() {
     melodyIndex?: number | null;
     melodyOwnerIndex?: number | null;
     loopInfo?: { current: number; total: number };
+    /** メロディー面で塗る拍のマス。コードのスロットとは刻みが違う */
+    beatCell?: number | null;
   } | null>(null);
 
   const [menu, setMenu] = useState<{ kind: MenuKind; anchor: Anchor } | null>(null);
@@ -341,6 +348,33 @@ export default function App() {
     [project?.voicingOptimize, project?.voicingMin, project?.voicingMax],
   );
 
+  /**
+   * 編集対象の音（フォーカス）。
+   *
+   * カーソルが乗っただけでは掴まない。**同じ音の上で位置の操作が2回続いたとき**に
+   * 掴む。伸ばした音の中を通り過ぎるだけのときに音価が奪われたり、うっかり
+   * その音を書き換えたりしないための一段の間である。置いた直後の音は
+   * 明示的な操作の結果なので、その場でフォーカスする。
+   */
+  const [focusedNoteKey, setFocusedNoteKey] = useState<string | null>(null);
+  /** 直前の位置操作で触れていた音。2回目の判定に使う */
+  const touchedNoteKey = useRef<string | null>(null);
+
+  /** カーソルを動かしたときのフォーカス更新。2回続けて同じ音に当たったら掴む */
+  const trackFocus = useCallback((source: Project, measureId: string, start: number) => {
+    const hit = melodyNoteAtCursor(source, measureId, start);
+    const key = hit ? noteKeyOf(hit) : null;
+    setFocusedNoteKey(key && key === touchedNoteKey.current ? key : null);
+    touchedNoteKey.current = key;
+  }, []);
+
+  /** 音を明示的に掴む。置いた直後や、長さを直した直後に使う */
+  const focusNote = useCallback((measureId: string, start: number) => {
+    const key = noteKey(measureId, start);
+    setFocusedNoteKey(key);
+    touchedNoteKey.current = key;
+  }, []);
+
   const handleSelectSlot = useCallback(
     (measureId: string, slotIndex: number, shiftKey: boolean) => {
       // 範囲選択モードでは1回目のタップで始点、2回目で終点を置く
@@ -357,7 +391,9 @@ export default function App() {
       // 細かい位置はここからボタンで詰める
       if (editMode === 'melody' && project && measure) {
         const index = project.measures.indexOf(measure);
-        setMelodyOffset(slotIndex * beatLength(resolveSettings(index).timeSignature));
+        const start = slotIndex * beatLength(resolveSettings(index).timeSignature);
+        setMelodyOffset(start);
+        trackFocus(project, measureId, start);
         return;
       }
 
@@ -375,6 +411,7 @@ export default function App() {
       voicingOptions,
       editMode,
       resolveSettings,
+      trackFocus,
     ],
   );
 
@@ -531,13 +568,18 @@ export default function App() {
   );
 
   /**
-   * いま編集の対象になっている音。カーソルを含む音か、カーソルちょうどで
-   * 終わる音。後者があるので、置いた直後の音の長さをそのまま直せる
+   * カーソルが触れている音。カーソルを含む音か、カーソルちょうどで終わる音。
+   * ここに触れただけでは編集対象にはならない（下の「段階フォーカス」を見よ）
    */
-  const selectedMelodyNote = useMemo(() => {
+  const noteAtCursor = useMemo(() => {
     if (!project || !selectedSlot) return null;
     return melodyNoteAtCursor(project, selectedSlot.measureId, melodyCursorStart);
   }, [project, selectedSlot, melodyCursorStart]);
+
+  const focusedNote = useMemo(
+    () => (noteAtCursor && noteKeyOf(noteAtCursor) === focusedNoteKey ? noteAtCursor : null),
+    [noteAtCursor, focusedNoteKey],
+  );
 
   /** カーソルより前で最後に鳴り始めた音。次の音をこの近くに置く */
   const previousMelodyPitch = useMemo((): number | null => {
@@ -570,8 +612,9 @@ export default function App() {
       const beat = beatLength(resolveSettings(index).timeSignature);
       setSelectedSlot({ measureId: measure.id, slotIndex: Math.floor(start / beat + 0.0001) });
       setMelodyOffset(start);
+      trackFocus(project, measure.id, start);
     },
-    [project, resolveSettings],
+    [project, resolveSettings, trackFocus],
   );
 
   /** カーソルの絶対位置 */
@@ -607,6 +650,9 @@ export default function App() {
       if (!isPlaying) void audio.playMelodyNote(pitch);
       // ポチポチ打てるよう、置いた音のぶんだけカーソルを進める
       seekMelody(melodyDuration);
+      // 置いた音は明示的な操作の結果なので、その場で掴む。
+      // カーソル移動より後に呼ぶこと（seekMelody 側の判定を上書きする）
+      focusNote(selectedSlot.measureId, melodyCursorStart);
     },
     [
       project,
@@ -618,17 +664,21 @@ export default function App() {
       commit,
       isPlaying,
       seekMelody,
+      focusNote,
     ],
   );
 
-  /** 音価を変える。カーソルに音があればその長さも変える */
+  /**
+   * 音価を変える。**掴んでいる音があればその長さも変える。**
+   * 触れているだけの音は変えない。通りすがりに書き換えてしまわないため
+   */
   const changeMelodyValue = useCallback(
     (value: number, nextDotted = dotted, nextTriplet = triplet) => {
       setNoteValue(value);
       setDotted(nextDotted);
       setTriplet(nextTriplet);
-      if (!project || !selectedMelodyNote) return;
-      const { note, measureId, abs } = selectedMelodyNote;
+      if (!project || !focusedNote) return;
+      const { note, measureId, abs } = focusedNote;
       const duration = value * (nextDotted ? 1.5 : 1) * (nextTriplet ? 2 / 3 : 1);
       history.push(project, '音価変更');
       commit(writeMelodyNote(project, measureId, note.start, { pitch: note.pitch, duration }));
@@ -636,16 +686,19 @@ export default function App() {
       if (Math.abs(melodyCursorAbs - (abs + note.duration)) < 0.0001) {
         seekMelodyTo(abs + duration);
       }
+      // 続けて長さを詰められるよう、掴んだままにする
+      focusNote(measureId, note.start);
     },
     [
       dotted,
       triplet,
       project,
-      selectedMelodyNote,
+      focusedNote,
       melodyCursorAbs,
       history,
       commit,
       seekMelodyTo,
+      focusNote,
     ],
   );
 
@@ -659,11 +712,11 @@ export default function App() {
     [noteValue, changeMelodyValue],
   );
 
-  /** 選んでいる音を半音・オクターブ動かす */
+  /** 掴んでいる音を半音・オクターブ動かす */
   const shiftMelody = useCallback(
     (semitones: number) => {
-      if (!project || !selectedMelodyNote) return;
-      const { note, measureId } = selectedMelodyNote;
+      if (!project || !focusedNote) return;
+      const { note, measureId } = focusedNote;
       const pitch = note.pitch + semitones;
       history.push(project, 'メロディー変更');
       commit(
@@ -671,26 +724,8 @@ export default function App() {
       );
       if (!isPlaying) void audio.playMelodyNote(pitch);
     },
-    [project, selectedMelodyNote, history, commit, isPlaying],
+    [project, focusedNote, history, commit, isPlaying],
   );
-
-  // 音の上にカーソルが来たら、その音価をボタン側にも反映する
-  useEffect(() => {
-    if (editMode !== 'melody' || !selectedMelodyNote) return;
-    const duration = selectedMelodyNote.note.duration;
-    for (const { value } of NOTE_VALUES) {
-      const apply = (nextDotted: boolean, nextTriplet: boolean) => {
-        setNoteValue(value);
-        setDotted(nextDotted);
-        setTriplet(nextTriplet);
-      };
-      if (Math.abs(duration - value) < 0.001) return apply(false, false);
-      if (Math.abs(duration - value * 1.5) < 0.001) return apply(true, false);
-      if (Math.abs(duration - (value * 2) / 3) < 0.001) return apply(false, true);
-    }
-    // 選択が変わったときだけ見る。入力のたびに走らせると音価が勝手に戻る
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editMode, selectedSlot?.measureId, selectedSlot?.slotIndex]);
 
   const deleteChordOnly = useCallback(() => {
     if (!project || !selectedSlot) return;
@@ -705,10 +740,10 @@ export default function App() {
 
       let from: number;
       let to: number;
-      if (!selectionEnd && selectedMelodyNote) {
-        // 単独選択のときは、対象として光っている音そのものを消す
-        from = selectedMelodyNote.abs;
-        to = from + selectedMelodyNote.note.duration;
+      if (!selectionEnd && focusedNote) {
+        // 単独選択のときは、掴んでいる音そのものを消す
+        from = focusedNote.abs;
+        to = from + focusedNote.note.duration;
       } else {
         // 光っている音が無ければ、カーソルのいるマス（範囲ならその全体）を空にする
         from = spans[range.from].start + range.firstSlot * cellBeat(range.from);
@@ -743,7 +778,7 @@ export default function App() {
     history,
     commit,
     editMode,
-    selectedMelodyNote,
+    focusedNote,
   ]);
 
   // --- コピー & ペースト ---
@@ -844,6 +879,7 @@ export default function App() {
             melodyIndex: current?.melodyIndex,
             melodyOwnerIndex: current?.melodyOwnerIndex,
             loopInfo: event.loopInfo,
+            beatCell: event.beatCell ?? null,
           })),
         onMelody: (event) =>
           setPlayingSlot((current) => ({
@@ -852,6 +888,7 @@ export default function App() {
             melodyIndex: event.melodyIndex ?? null,
             melodyOwnerIndex: event.sourceMeasureIndex,
             loopInfo: event.loopInfo,
+            beatCell: event.beatCell ?? current?.beatCell ?? null,
           })),
         onEnd: () => {
           setIsPlaying(false);
@@ -1161,10 +1198,10 @@ export default function App() {
             onSelectSlot={handleSelectSlot}
             melodyCursor={editMode === 'melody' ? melodyCursor : null}
             selectedMelodyNote={
-              editMode === 'melody' && selectedMelodyNote
+              editMode === 'melody' && focusedNote
                 ? {
-                    ownerIndex: selectedMelodyNote.ownerIndex,
-                    noteIndex: selectedMelodyNote.noteIndex,
+                    ownerIndex: focusedNote.ownerIndex,
+                    noteIndex: focusedNote.noteIndex,
                   }
                 : null
             }
@@ -1240,7 +1277,7 @@ export default function App() {
 
           {editMode === 'melody' ? (
             <MelodyKeyboard
-              selected={selectedMelodyNote?.note ?? null}
+              selected={focusedNote?.note ?? null}
               previousPitch={previousMelodyPitch}
               projectKey={
                 selectedMeasureIndex >= 0 ? resolveSettings(selectedMeasureIndex).key : project.key

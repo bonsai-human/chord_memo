@@ -20,6 +20,11 @@ export interface ScheduledEvent {
   melodyIndex?: number;
   loopInfo?: { current: number; total: number };
   expansionIndex?: number;
+  /**
+   * 小節の何番目の拍にいるか（拍どおりの等分＝メロディー面のマス）。
+   * コードのスロットとは刻みが違うので、位置表示のために別に持つ
+   */
+  beatCell?: number;
 }
 
 export interface Timeline {
@@ -79,6 +84,9 @@ export function buildTimeline(project: Project, options: Options = {}): Timeline
     // メロディーはコードと別の刻みを持つので、小節の頭から別に積む
     const measureStart = elapsed;
     const measurePosition = position;
+    const beat = 4 / timeSignature[1];
+    /** 小節頭からの拍位置を、メロディー面のマス番号に直す */
+    const cellOf = (offset: number) => Math.floor(offset / beat + 0.001);
 
     measure.slots.forEach((slot, slotIndex) => {
       const delay = (p: number) => swingDelay(p, measureResolution, tempo, swing);
@@ -116,6 +124,7 @@ export function buildTimeline(project: Project, options: Options = {}): Timeline
           tempo,
           loopInfo,
           expansionIndex,
+          beatCell: cellOf(position - measurePosition),
         });
       } else {
         // コードのないスロットは直前のコードを伸ばし、位置表示だけ行う
@@ -133,6 +142,7 @@ export function buildTimeline(project: Project, options: Options = {}): Timeline
           tempo,
           loopInfo,
           expansionIndex,
+          beatCell: cellOf(position - measurePosition),
         });
       }
 
@@ -161,6 +171,7 @@ export function buildTimeline(project: Project, options: Options = {}): Timeline
         pitch: note.pitch,
         melodyIndex,
         loopInfo,
+        beatCell: cellOf(note.start),
       });
     });
 
