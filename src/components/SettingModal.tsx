@@ -17,6 +17,13 @@ const TITLES: Record<SettingType, string> = {
 const MAJOR_KEYS = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'];
 const MINOR_KEYS = MAJOR_KEYS.map((k) => RELATIVE_MINOR[k]);
 
+/** タップテンポで平均を取る間隔の数。増やすほど安定するが追従が鈍る */
+const TAP_SAMPLES = 4;
+/** これだけ間が空いたら数え直し */
+const TAP_RESET_MS = 2000;
+const TEMPO_MIN = 40;
+const TEMPO_MAX = 300;
+
 interface Props {
   type: SettingType;
   project: Project;
@@ -62,6 +69,25 @@ export default function SettingModal({
   const [referenceLabel, setReferenceLabel] = useState(measure.referenceLabel || '');
   const [loopCount, setLoopCount] = useState(String(measure.referenceLoopCount || 1));
   const [label, setLabel] = useState(measure.label || '');
+  /** タップテンポで押した時刻。間が空いたら捨てる */
+  const [taps, setTaps] = useState<number[]>([]);
+
+  /**
+   * タップでテンポを測る。直近 TAP_SAMPLES 個の間隔の平均から求める。
+   * 入力欄を書き換えるだけなので、気に入らなければ「キャンセル」で捨てられる
+   */
+  const tapTempo = () => {
+    const now = performance.now();
+    const recent = taps.length > 0 && now - taps[taps.length - 1] > TAP_RESET_MS ? [] : taps;
+    const next = [...recent, now].slice(-(TAP_SAMPLES + 1));
+    setTaps(next);
+    if (next.length < 2) return;
+
+    const span = next[next.length - 1] - next[0];
+    const average = span / (next.length - 1);
+    const bpm = Math.round(60000 / average);
+    setTempo(String(Math.min(TEMPO_MAX, Math.max(TEMPO_MIN, bpm))));
+  };
 
   const availableLabels = Array.from(
     new Set(project.measures.map((m) => m.label).filter((l): l is string => !!l && l !== measure.label)),
@@ -158,14 +184,44 @@ export default function SettingModal({
       )}
 
       {type === 'tempo' && (
-        <input
-          type="text"
-          inputMode="numeric"
-          value={tempo}
-          autoFocus
-          onChange={(e) => setTempo(e.target.value)}
-          style={inputStyle}
-        />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'stretch' }}>
+            <input
+              type="text"
+              inputMode="numeric"
+              value={tempo}
+              autoFocus
+              onChange={(e) => {
+                setTempo(e.target.value);
+                setTaps([]);
+              }}
+              style={{ ...inputStyle, flex: 1 }}
+            />
+            <button
+              onClick={tapTempo}
+              style={{
+                width: '96px',
+                background: taps.length > 0 ? 'var(--accent)' : 'var(--border)',
+                color: taps.length > 0 ? 'var(--bg)' : 'white',
+                border: 'none',
+                borderRadius: '4px',
+                fontWeight: 'bold',
+                cursor: 'pointer',
+                // 連打するボタンなので、長押しの選択や拡大鏡が出ないようにする
+                touchAction: 'manipulation',
+                userSelect: 'none',
+                WebkitTapHighlightColor: 'transparent',
+              }}
+            >
+              タップ
+            </button>
+          </div>
+          <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>
+            {taps.length < 2
+              ? '「タップ」を拍に合わせて4回ほど叩くとテンポを測ります'
+              : `${taps.length - 1} 回ぶんの間隔から算出（2秒あけると測り直し）`}
+          </span>
+        </div>
       )}
 
       {type === 'timeSignature' && (
