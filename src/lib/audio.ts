@@ -594,6 +594,24 @@ export function stop(): void {
 }
 
 /**
+ * 秒を tick の境界へ落とす。
+ *
+ * Tone は `transport.schedule()` に渡した時刻を tick へ直したあと**切り捨てて**
+ * 保持する（TransportEvent）。一方 `transport.start(t, offset)` の offset は
+ * 小数の tick のまま渡り、最初に発火する tick は**四捨五入**される。発火判定は
+ * tick の完全一致なので、開始位置の小数部が 0.5 以上だと
+ * 「イベントの tick（切り捨て）＜ 最初の tick（四捨五入）」となり、
+ * **開始位置ちょうどのイベントだけが鳴らずに飛ぶ**。
+ *
+ * 登録側と同じ切り捨てに揃えることでこれを防ぐ。ずれても 1 tick（既定の
+ * 120BPM / 192PPQ で約 2.6ms）なので聴感には出ない。
+ */
+function floorToTick(seconds: number): number {
+  if (seconds <= 0) return 0;
+  return Tone.Ticks(Math.floor(Tone.TransportTime(seconds).toTicks())).toSeconds();
+}
+
+/**
  * 途中から再生するとき、その位置をまたいで鳴り続けているコードを拾って鳴らす。
  * 開始位置ちょうどに始まるコードは通常のスケジュールで鳴るため対象外にする
  * （含めると同じコードが二重に鳴る）。
@@ -656,7 +674,7 @@ export async function playGrid({
     max: project.voicingMax,
   };
 
-  const startAt = from ? timeOf(timeline, from.measureIndex, from.slotIndex) : 0;
+  const startAt = from ? floorToTick(timeOf(timeline, from.measureIndex, from.slotIndex)) : 0;
   const player = activeInstrument();
 
   // ボイシングは時間順に決める。前のコードからの動きを見るため、
@@ -714,8 +732,12 @@ export async function playGrid({
 
   if (project.loopEnabled) {
     transport.loop = true;
-    transport.loopStart = bounds ? bounds.start : 0;
-    transport.loopEnd = bounds ? bounds.end : timeline.totalDuration;
+    // 折り返しも同じ理由で tick 境界に揃える。半端なままだと周回のたびに
+    // 先頭のコードが飛ぶ。終端は、折り返しの判定（ticks >= loopEnd）が
+    // イベントの発火より先に走るので、切り捨てておけば範囲外の次のコードを
+    // 踏まずに戻れる
+    transport.loopStart = bounds ? floorToTick(bounds.start) : 0;
+    transport.loopEnd = bounds ? floorToTick(bounds.end) : timeline.totalDuration;
   } else {
     transport.loop = false;
     // stop() は transport.cancel() を呼ぶため、コールバックの外へ逃がす

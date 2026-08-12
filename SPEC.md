@@ -280,7 +280,13 @@ Proxy 経由でマイナーキー（`Am` など）を平行長調に変換して
 
 ### ループ
 
-`loopEnabled` 時は Tone.Transport の `loop` を使い、`loopStart = 0` / `loopEnd = totalDuration`。
+`loopEnabled` 時は Tone.Transport の `loop` を使い、`loopStart = 0` / `loopEnd = totalDuration`。範囲を選んでいればその範囲（`rangeBounds`）を繰り返す。
+
+### tick 境界への丸め
+
+Tone は登録したイベントの時刻を tick に直して**切り捨てて**保持する一方、再生開始位置（`start` の offset）と `loopStart` は小数の tick のまま扱い、最初に発火する tick を**四捨五入**する。発火判定は tick の完全一致なので、位置の小数部が 0.5 以上だと**そこちょうどのイベントだけが飛ぶ**（テンポと位置によって当たり外れが変わる）。
+
+これを避けるため、途中再生の開始位置・`loopStart`・`loopEnd` はいずれも**登録側と同じ切り捨て**で tick 境界へ揃える。ずれは最大 1 tick（Transport は 120BPM / 192PPQ 固定なので約 2.6ms）。`loopEnd` も切り捨てることで、折り返しの直前に範囲外の次のコードを踏まずに戻れる。
 
 ---
 
